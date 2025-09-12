@@ -50,7 +50,8 @@ class Lexer:
         'ALTER', 'ADD', 'COLUMN', 'ORDER', 'BY', 'GROUP', 'HAVING', 'DISTINCT',
         'AS', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'ON', 'UNION', 'ALL',
         'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'IF', 'EXISTS', 'BETWEEN', 'LIKE',
-        'IN', 'IS', 'ASC', 'DESC', 'LIMIT', 'OFFSET'
+        'IN', 'IS', 'ASC', 'DESC', 'LIMIT', 'OFFSET','SHOW', 'TABLES','RENAME',
+        'TO','MODIFY','CHAR'
     }
 
     # 操作符

@@ -59,7 +59,7 @@ class IntegratedMiniDBCLI:
     def __init__(self, data_dir: str = "minidb_data"):
         self.data_dir = data_dir
         self.show_mode = "result"  # 默认显示执行结果
-
+        self._init_readline()
         # 初始化A阶段组件（如果可用）
         if SQL_COMPILER_AVAILABLE:
             self.lexer = Lexer()
@@ -90,20 +90,21 @@ class IntegratedMiniDBCLI:
             print("⚠ 部分组件不可用，功能受限")
 
     def run_interactive(self):
-        """启动交互模式"""
+        """启动交互模式（★ 支持多行输入与历史）"""
         self._show_banner()
 
         while True:
             try:
-                line = input("minidb> ").strip()
-
-                if not line:
+                # ★ 读取一条完整语句（可多行）
+                sql_or_cmd = self._read_sql_statement()
+                if not sql_or_cmd:
                     continue
 
-                if line.startswith('.'):
-                    self._handle_system_command(line)
+                # 系统命令以.开头仍按单条处理
+                if sql_or_cmd.startswith('.'):
+                    self._handle_system_command(sql_or_cmd)
                 else:
-                    self._process_sql_statement(line)
+                    self._process_sql_statement(sql_or_cmd)
 
             except KeyboardInterrupt:
                 print("\n使用 .exit 退出")
@@ -154,6 +155,9 @@ class IntegratedMiniDBCLI:
         print("   SELECT id,name FROM users WHERE age > 20;")
         print("   DELETE FROM users WHERE id = 1;")
         print()
+
+
+
 
     def _handle_system_command(self, command: str):
         """处理系统命令"""
@@ -384,22 +388,59 @@ class IntegratedMiniDBCLI:
 
     def _update_catalog_after_execution(self, sql: str, results: list):
         """执行后更新系统目录统计"""
-        # ★ 如果是 CREATE TABLE，尝试从 SQL 里取表名并注册到系统目录
         sql_upper = sql.strip().upper()
+
+        # === 1) CREATE TABLE：保留原逻辑 ===
         if sql_upper.startswith('CREATE TABLE'):
             try:
-                # 粗略取表名：CREATE TABLE <name> (
                 import re
                 m = re.match(r'CREATE\s+TABLE\s+([A-Za-z_]\w*)', sql, re.IGNORECASE)
                 if m:
                     tbl = m.group(1)
-                    # 从存储引擎拿列定义回填系统目录
                     info = self.storage_engine.get_table_info(tbl)
                     if info is not None:
-                        cols = [{"name": c.name, "type": c.type, "max_length": c.max_length} for c in info.schema.columns]
+                        cols = [{"name": c.name, "type": c.type, "max_length": c.max_length} for c in
+                                info.schema.columns]
                         self.catalog_manager.register_table(tbl, cols)
             except Exception:
                 pass  # 失败不影响主流程
+            return  # CREATE 处理完就返回
+
+        # === ★ 新增：2) INSERT INTO <table> ... ===
+        if sql_upper.startswith('INSERT INTO'):
+            try:
+                import re
+                m = re.match(r'INSERT\s+INTO\s+([A-Za-z_]\w*)', sql, re.IGNORECASE)
+                if m:
+                    tbl = m.group(1)
+                    # executor 的 InsertOperator 会返回 {"affected_rows": 1}
+                    affected = 0
+                    for r in results:
+                        if isinstance(r, dict) and 'affected_rows' in r:
+                            affected += int(r['affected_rows'])
+                    if affected == 0:
+                        affected = 1  # 容错：没有返回则按单行插入兜底
+                    self.catalog_manager.update_table_row_count(tbl, affected)
+            except Exception:
+                pass
+            return
+
+        # === ★ 新增：3) DELETE FROM <table> WHERE ... ===
+        if sql_upper.startswith('DELETE FROM'):
+            try:
+                import re
+                m = re.match(r'DELETE\s+FROM\s+([A-Za-z_]\w*)', sql, re.IGNORECASE)
+                if m:
+                    tbl = m.group(1)
+                    affected = 0
+                    for r in results:
+                        if isinstance(r, dict) and 'affected_rows' in r:
+                            affected += int(r['affected_rows'])
+                    if affected:
+                        self.catalog_manager.update_table_row_count(tbl, -affected)
+            except Exception:
+                pass
+            return
 
     def _simple_sql_execution(self, sql: str):
         """简化的SQL执行（当A阶段不可用时）"""
@@ -859,6 +900,84 @@ class IntegratedMiniDBCLI:
             print("正在保存数据...")
             self.storage_engine.close()
             print("数据已保存")
+
+    # ★ 新增：尝试启用历史/行编辑
+    def _init_readline(self):
+        try:
+            import readline  # Unix自带；Windows可 pip install pyreadline3
+            hist_file = str(Path(self.data_dir) / '.minidb_history')
+            try:
+                readline.read_history_file(hist_file)
+            except Exception:
+                pass
+            try:
+                import atexit
+                atexit.register(lambda: readline.write_history_file(hist_file))
+            except Exception:
+                pass
+        except Exception:
+            # 没有 readline 也不报错，功能降级
+            pass
+
+    # ★ 新增：去除不可见空白、NBSP、零宽字符等
+    def _normalize_sql(self, s: str) -> str:
+        bad = [
+            '\u00A0',  # NBSP
+            '\u200B',  # zero width space
+            '\uFEFF',  # BOM
+        ]
+        for ch in bad:
+            s = s.replace(ch, ' ')
+        # 多个空白合并
+        return ' '.join(s.strip().split())
+
+    # ★ 新增：判断缓冲的 SQL 是否“完整”
+    # 规则：包含分号且括号配平
+    def _is_complete_statement(self, buf: str) -> bool:
+        if ';' not in buf:
+            return False
+        # 括号配平（不考虑引号内复杂情况，够用）
+        depth = 0
+        in_single = False
+        in_double = False
+        i = 0
+        while i < len(buf):
+            c = buf[i]
+            if c == "'" and not in_double:
+                in_single = not in_single
+            elif c == '"' and not in_single:
+                in_double = not in_double
+            elif not in_single and not in_double:
+                if c == '(':
+                    depth += 1
+                elif c == ')':
+                    depth -= 1
+            i += 1
+        return depth == 0 and buf.strip().endswith(';')
+
+        # ★ 新增：读取一条（可能跨多行的）SQL
+
+    def _read_sql_statement(self) -> str:
+        prompt = "minidb> "
+        cont_prompt = "   ...> "  # 续行提示
+        buf = ""
+        while True:
+            line = input(prompt if not buf else cont_prompt)
+            if line is None:
+                line = ""
+
+            # ★ 新增：首行就是点命令，直接返回，不要求分号
+            if not buf and line.strip().startswith('.'):
+                return line.strip()
+
+            # 累加原始文本（保留换行以便括号判断）
+            buf = (buf + "\n" + line) if buf else line
+
+            # 先做一次轻度归一化做判断，但执行前再做一遍
+            check = self._normalize_sql(buf)
+            if self._is_complete_statement(check):
+                return self._normalize_sql(buf)
+            # 否则继续读下一行
 
 
 def main():
