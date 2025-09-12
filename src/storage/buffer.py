@@ -23,8 +23,8 @@ BufferPool - 页面缓冲池
 import time
 from collections import OrderedDict, deque
 from typing import Dict, Tuple, Set, List, Optional, Any
-from file_manager import FileManager
-from page import SlottedPage
+from storage.file_manager import FileManager
+from storage.page import SlottedPage
 
 
 class EvictionEvent:

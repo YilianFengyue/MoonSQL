@@ -23,9 +23,9 @@ import os
 import json
 import time
 from typing import Dict, List, Any, Iterator, Callable, Optional, Tuple
-from file_manager import FileManager
-from buffer import BufferPool
-from serdes import TableSchema, ColumnDef, ColumnType
+from storage.file_manager import FileManager
+from storage.buffer import BufferPool
+from storage.serdes import TableSchema, ColumnDef, ColumnType
 
 
 class TableInfo:

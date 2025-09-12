@@ -13,6 +13,7 @@ import json
 import time
 from pathlib import Path
 from tabulate import tabulate
+import traceback  # ★ 新增：打印完整堆栈
 
 # 添加src目录到路径
 src_dir = Path(__file__).parent.parent
@@ -39,6 +40,7 @@ try:
     STORAGE_ENGINE_AVAILABLE = True
 except ImportError as e:
     print(f"B+C阶段存储引擎导入失败: {e}")
+    traceback.print_exc()  # ★ 新增：输出完整堆栈，精确到文件与行号
     STORAGE_ENGINE_AVAILABLE = False
 
 # 测试模块
@@ -77,6 +79,7 @@ class IntegratedMiniDBCLI:
             print("✓ B+C阶段存储引擎已加载")
         else:
             print("❌ B+C阶段存储引擎不可用")
+
 
         # 检查集成状态
         self.fully_integrated = SQL_COMPILER_AVAILABLE and STORAGE_ENGINE_AVAILABLE
@@ -381,23 +384,22 @@ class IntegratedMiniDBCLI:
 
     def _update_catalog_after_execution(self, sql: str, results: list):
         """执行后更新系统目录统计"""
-        # 简化实现：如果是INSERT操作，更新行数统计
-        if sql.strip().upper().startswith('INSERT'):
-            affected_rows = 0
-            for result in results:
-                if isinstance(result, dict) and result.get('affected_rows'):
-                    affected_rows += result['affected_rows']
-
-            # 解析表名（简化）
+        # ★ 如果是 CREATE TABLE，尝试从 SQL 里取表名并注册到系统目录
+        sql_upper = sql.strip().upper()
+        if sql_upper.startswith('CREATE TABLE'):
             try:
-                parts = sql.upper().split()
-                if 'INTO' in parts:
-                    table_idx = parts.index('INTO') + 1
-                    if table_idx < len(parts):
-                        table_name = parts[table_idx].split('(')[0]
-                        self.catalog_manager.update_table_row_count(table_name, affected_rows)
-            except:
-                pass  # 忽略解析失败
+                # 粗略取表名：CREATE TABLE <name> (
+                import re
+                m = re.match(r'CREATE\s+TABLE\s+([A-Za-z_]\w*)', sql, re.IGNORECASE)
+                if m:
+                    tbl = m.group(1)
+                    # 从存储引擎拿列定义回填系统目录
+                    info = self.storage_engine.get_table_info(tbl)
+                    if info is not None:
+                        cols = [{"name": c.name, "type": c.type, "max_length": c.max_length} for c in info.schema.columns]
+                        self.catalog_manager.register_table(tbl, cols)
+            except Exception:
+                pass  # 失败不影响主流程
 
     def _simple_sql_execution(self, sql: str):
         """简化的SQL执行（当A阶段不可用时）"""

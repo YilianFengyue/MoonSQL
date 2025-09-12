@@ -58,20 +58,36 @@ class CreateTableOperator(Operator):
     """CREATE TABLE 算子"""
 
     def execute(self, storage_engine) -> Iterator[Dict[str, Any]]:
-        """执行建表操作"""
         table_name = self.plan.get('table')
         columns = self.plan.get('columns', [])
 
         if not table_name:
             raise ExecutionError("CREATE TABLE: 缺少表名")
-
         if not columns:
             raise ExecutionError("CREATE TABLE: 缺少列定义")
 
-        try:
-            storage_engine.create_table(table_name, columns)
-            yield {"status": "success", "message": f"表 {table_name} 创建成功"}
+        # ★ 规范化列定义：兼容 Planner 输出的 "VARCHAR(50)"
+        normalized = []
+        for col in columns:
+            name = col.get("name")
+            raw_type = str(col.get("type", "")).upper()
+            col_def = {"name": name}
 
+            if raw_type.startswith("VARCHAR("):
+                m = re.match(r"VARCHAR\((\d+)\)", raw_type)
+                if not m:
+                    raise ExecutionError(f"CREATE TABLE: 无效的VARCHAR定义: {raw_type}")
+                col_def["type"] = "VARCHAR"
+                col_def["max_length"] = int(m.group(1))
+            else:
+                # 其他类型直接传递（INT/INTEGER 等）
+                col_def["type"] = raw_type
+
+            normalized.append(col_def)
+
+        try:
+            storage_engine.create_table(table_name, normalized)  # ★ 用 normalized
+            yield {"status": "success", "message": f"表 {table_name} 创建成功"}
         except Exception as e:
             raise ExecutionError(f"CREATE TABLE失败: {e}")
 
@@ -82,7 +98,16 @@ class InsertOperator(Operator):
     def execute(self, storage_engine) -> Iterator[Dict[str, Any]]:
         """执行插入操作"""
         table_name = self.plan.get('table')
-        values = self.plan.get('values', [])
+        # 替换为：
+        raw_values = self.plan.get('values', [])
+        # ★ 兼容 Planner 的对象数组：提取真实值
+        values = []
+        for v in raw_values:
+            if isinstance(v, dict) and 'value' in v:
+                values.append(v['value'])
+            else:
+                values.append(v)
+
         columns = self.plan.get('columns')  # 可选，指定列名
 
         if not table_name:
@@ -142,9 +167,18 @@ class SeqScanOperator(Operator):
 class FilterOperator(Operator):
     """过滤算子"""
 
+    """过滤算子"""
+
     def __init__(self, plan: Dict[str, Any]):
         super().__init__(plan)
         self.condition = plan.get('condition')
+
+        # ★ 新增：兼容 Planner 的 predicate（字符串）
+        if not self.condition:
+            pred = plan.get('predicate')
+            if isinstance(pred, str):
+                self.condition = self._parse_predicate_string(pred)
+
         if not self.condition:
             raise ExecutionError("Filter: 缺少过滤条件")
 
@@ -201,6 +235,31 @@ class FilterOperator(Operator):
         else:
             # 常量
             return ref
+
+    def _parse_predicate_string(self, pred: str):
+        """
+        ★ 将 'col op value' 形式的字符串解析为 condition 字典
+          支持: =, ==, !=, <>, <, <=, >, >=, LIKE
+          覆盖 WHERE age > 20 / name = 'Alice' 这类简单场景
+        """
+        s = pred.strip()
+        m = re.match(r"^\s*([A-Za-z_]\w*)\s*(=|==|!=|<>|<=|>=|<|>|LIKE)\s*(.+?)\s*$", s, re.IGNORECASE)
+        if not m:
+            return None
+        col, op, right = m.groups()
+        right = right.strip()
+        # 去引号/尝试转数字
+        if (right.startswith("'") and right.endswith("'")) or (right.startswith('"') and right.endswith('"')):
+            rv = right[1:-1]
+        else:
+            try:
+                rv = int(right)
+            except ValueError:
+                try:
+                    rv = float(right)
+                except ValueError:
+                    rv = right
+        return {"type": "compare", "left": col, "op": op.upper(), "right": rv}
 
     def _compare_values(self, left: Any, right: Any, op: str) -> bool:
         """比较两个值"""
@@ -282,7 +341,9 @@ class DeleteOperator(Operator):
 
     def __init__(self, plan: Dict[str, Any]):
         super().__init__(plan)
-        self.condition = plan.get('condition')  # 可选，WHERE条件
+        # 可能没有直接给 condition，先记录；不要抛错
+        self.condition = plan.get('condition')
+        # 不在这里解析/报错，执行时会从 child Filter 兜底
 
     def execute(self, storage_engine) -> Iterator[Dict[str, Any]]:
         """执行删除操作"""
@@ -292,14 +353,18 @@ class DeleteOperator(Operator):
             raise ExecutionError("DELETE: 缺少表名")
 
         try:
-            if self.condition:
-                # 有条件删除: DELETE FROM table WHERE condition
+            cond = self.condition
+            if cond is None and self.children:
+                child = self.children[0]
+                if isinstance(child, FilterOperator):
+                    cond = child.condition
+
+            if cond:
                 def predicate(row):
-                    return self._evaluate_condition(row, self.condition)
+                    return FilterOperator({"condition": cond})._evaluate_condition(row, cond)
 
                 deleted_count = storage_engine.delete_where(table_name, predicate)
             else:
-                # 无条件删除: DELETE FROM table (删除所有记录)
                 deleted_count = storage_engine.delete_where(table_name, lambda row: True)
 
             yield {"status": "success", "message": f"删除成功", "affected_rows": deleted_count}

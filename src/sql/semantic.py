@@ -171,6 +171,7 @@ class SemanticAnalyzer:
         columns = []
         column_names = set()
 
+        # 在这个位置添加长度解析逻辑：
         for col_def in node.columns:
             col_name = col_def.name
             col_type = col_def.data_type
@@ -182,12 +183,22 @@ class SemanticAnalyzer:
 
             column_names.add(col_name.lower())
 
-            # 验证数据类型
-            if not self._is_valid_type(col_type):
-                raise SemanticError(col_def.line, col_def.col,
-                                    f"Invalid data type '{col_type}'")
+            # 验证数据类型并解析长度 -- 新增代码
+            col_info = {"name": col_name, "type": col_type}
 
-            columns.append({"name": col_name, "type": col_type})
+            if col_type.startswith("VARCHAR("):
+                # 解析VARCHAR(50) -> type="VARCHAR", max_length=50
+                import re
+                match = re.match(r'VARCHAR\((\d+)\)', col_type)
+                if match:
+                    max_length = int(match.group(1))
+                    col_info = {"name": col_name, "type": "VARCHAR", "max_length": max_length}
+                else:
+                    raise SemanticError(col_def.line, col_def.col, f"Invalid VARCHAR format: {col_type}")
+            elif not self._is_valid_type(col_type):
+                raise SemanticError(col_def.line, col_def.col, f"Invalid data type '{col_type}'")
+
+            columns.append(col_info)
 
         # 检查是否至少有一个列
         if not columns:

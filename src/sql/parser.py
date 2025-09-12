@@ -197,8 +197,8 @@ class Parser:
 
         return CreateTableNode(table_name, columns, table_token.line, table_token.col)
 
+    # 修改为：
     def _parse_column_def(self) -> ColumnDefNode:
-        """解析列定义"""
         # 列名
         name_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name")
         name = name_token.lexeme
@@ -211,8 +211,11 @@ class Parser:
         if data_type == "VARCHAR":
             if self._check(TokenType.DELIMITER) and self._peek().lexeme == "(":
                 self._advance()  # 消费左括号
-                self._consume(TokenType.NUMBER, None, "Expected size after VARCHAR(")
+                size_token = self._consume(TokenType.NUMBER, None, "Expected size after VARCHAR(")
                 self._consume(TokenType.DELIMITER, ")", "Expected ')' after VARCHAR size")
+
+                # 保存完整类型信息，包含长度
+                data_type = f"VARCHAR({size_token.lexeme})"
 
         return ColumnDefNode(name, data_type, name_token.line, name_token.col)
 

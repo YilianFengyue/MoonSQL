@@ -1,25 +1,5 @@
 
 ```
-MoonSQL
-├─ README.md
-└─ src
-   ├─ cli
-   │  └─ __init__.py
-   ├─ client
-   │  └─ __init__.py
-   ├─ engine
-   │  └─ __init__.py
-   ├─ main.py
-   ├─ sql
-   │  ├─ lexer.py
-   │  └─ __init__.py
-   ├─ storage
-   │  └─ __init__.py
-   ├─ tests
-   │  └─ __init__.py
-   ├─ wire
-   │  └─ __init__.py
-   └─ 任务计划书.md
 
 ```
 
@@ -216,3 +196,71 @@ MoonSQL
 > 以上步骤完全覆盖任务书“编译器四阶段、页式存储与缓存、执行器与系统目录、交互与持久化验证”的硬性考核点，并提供可选扩展项的**渐进式**实现路径；接口先行、实现可替换，确保从 D0 起即可演示、逐日增强直到完整。 
 
 如果你愿意，我可以把 **Phase 0–A1** 的最小代码骨架（文件清单 + 函数签名 + 假实现）直接给成“可运行”版本，后续你只需要替换具体实现即可。
+```
+MoonSQL
+├─ data
+├─ README.md
+├─ src
+│  ├─ cli
+│  │  ├─ data
+│  │  ├─ minidb_cli.py
+│  │  ├─ minidb_cliA.py
+│  │  └─ __init__.py
+│  ├─ client
+│  │  └─ __init__.py
+│  ├─ engine
+│  │  ├─ catalog_mgr.py
+│  │  ├─ executor.py
+│  │  ├─ interfaces.py
+│  │  ├─ test_catalog_data
+│  │  │  ├─ sys_columns.tbl
+│  │  │  ├─ sys_indexes.tbl
+│  │  │  ├─ sys_tables.tbl
+│  │  │  └─ tables_metadata.json
+│  │  ├─ test_catalog_persist
+│  │  │  ├─ sys_columns.tbl
+│  │  │  ├─ sys_indexes.tbl
+│  │  │  ├─ sys_tables.tbl
+│  │  │  └─ tables_metadata.json
+│  │  ├─ test_complex_data
+│  │  │  ├─ employees.tbl
+│  │  │  └─ tables_metadata.json
+│  │  ├─ test_executor_data
+│  │  │  ├─ tables_metadata.json
+│  │  │  └─ test_exec.tbl
+│  │  └─ __init__.py
+│  ├─ main.py
+│  ├─ sql
+│  │  ├─ lexer.py
+│  │  ├─ parser.py
+│  │  ├─ planner.py
+│  │  ├─ semantic.py
+│  │  └─ __init__.py
+│  ├─ storage
+│  │  ├─ buffer.py
+│  │  ├─ file_manager.py
+│  │  ├─ page.py
+│  │  ├─ serdes.py
+│  │  ├─ storage_engine.py
+│  │  ├─ test_buffer_data
+│  │  ├─ test_data
+│  │  ├─ test_dirty_data
+│  │  ├─ test_persistence_data
+│  │  │  ├─ tables_metadata.json
+│  │  │  └─ test_persistence.tbl
+│  │  ├─ test_policy_data
+│  │  ├─ test_storage_data
+│  │  │  ├─ courses.tbl
+│  │  │  ├─ students.tbl
+│  │  │  └─ tables_metadata.json
+│  │  └─ __init__.py
+│  ├─ tests
+│  │  ├─ bad_cases.py
+│  │  ├─ test_sql.py
+│  │  └─ __init__.py
+│  ├─ wire
+│  │  └─ __init__.py
+│  └─ 任务计划书.md
+└─ test_a1.sql
+
+```
