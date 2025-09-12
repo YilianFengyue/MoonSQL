@@ -1,0 +1,31 @@
+{
+  "employees": {
+    "name": "employees",
+    "columns": [
+      {
+        "name": "id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "name",
+        "type": "VARCHAR",
+        "max_length": 30
+      },
+      {
+        "name": "department",
+        "type": "VARCHAR",
+        "max_length": 20
+      },
+      {
+        "name": "salary",
+        "type": "INT",
+        "max_length": null
+      }
+    ],
+    "total_rows": 5,
+    "total_pages": 1,
+    "created_time": 1757605217.7736182,
+    "last_modified": 1757605217.790101
+  }
+}

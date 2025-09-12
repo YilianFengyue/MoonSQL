@@ -1,0 +1,26 @@
+{
+  "test_exec": {
+    "name": "test_exec",
+    "columns": [
+      {
+        "name": "id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "name",
+        "type": "VARCHAR",
+        "max_length": 30
+      },
+      {
+        "name": "score",
+        "type": "INT",
+        "max_length": null
+      }
+    ],
+    "total_rows": 4,
+    "total_pages": 1,
+    "created_time": 1757605217.7532828,
+    "last_modified": 1757605217.7719967
+  }
+}

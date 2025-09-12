@@ -1,0 +1,55 @@
+{
+  "students": {
+    "name": "students",
+    "columns": [
+      {
+        "name": "id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "name",
+        "type": "VARCHAR",
+        "max_length": 50
+      },
+      {
+        "name": "age",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "email",
+        "type": "VARCHAR",
+        "max_length": 100
+      }
+    ],
+    "total_rows": 4,
+    "total_pages": 1,
+    "created_time": 1757604719.033208,
+    "last_modified": 1757604719.0633872
+  },
+  "courses": {
+    "name": "courses",
+    "columns": [
+      {
+        "name": "course_id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "title",
+        "type": "VARCHAR",
+        "max_length": 100
+      },
+      {
+        "name": "credits",
+        "type": "INT",
+        "max_length": null
+      }
+    ],
+    "total_rows": 3,
+    "total_pages": 1,
+    "created_time": 1757604719.033208,
+    "last_modified": 1757604719.0528429
+  }
+}

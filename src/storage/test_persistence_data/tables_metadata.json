@@ -1,0 +1,21 @@
+{
+  "test_persistence": {
+    "name": "test_persistence",
+    "columns": [
+      {
+        "name": "id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "message",
+        "type": "VARCHAR",
+        "max_length": 200
+      }
+    ],
+    "total_rows": 4,
+    "total_pages": 1,
+    "created_time": 1757604719.0644286,
+    "last_modified": 1757604719.1013122
+  }
+}

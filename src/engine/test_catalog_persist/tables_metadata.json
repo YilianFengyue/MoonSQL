@@ -1,0 +1,99 @@
+{
+  "sys_tables": {
+    "name": "sys_tables",
+    "columns": [
+      {
+        "name": "table_id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "table_name",
+        "type": "VARCHAR",
+        "max_length": 64
+      },
+      {
+        "name": "created_time",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "row_count",
+        "type": "INT",
+        "max_length": null
+      }
+    ],
+    "total_rows": 0,
+    "total_pages": 1,
+    "created_time": 1757605457.240404,
+    "last_modified": 1757605819.2353733
+  },
+  "sys_columns": {
+    "name": "sys_columns",
+    "columns": [
+      {
+        "name": "table_id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "column_name",
+        "type": "VARCHAR",
+        "max_length": 64
+      },
+      {
+        "name": "column_type",
+        "type": "VARCHAR",
+        "max_length": 20
+      },
+      {
+        "name": "max_length",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "ordinal_position",
+        "type": "INT",
+        "max_length": null
+      }
+    ],
+    "total_rows": 0,
+    "total_pages": 1,
+    "created_time": 1757605457.2423966,
+    "last_modified": 1757605819.2353733
+  },
+  "sys_indexes": {
+    "name": "sys_indexes",
+    "columns": [
+      {
+        "name": "index_id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "table_id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "index_name",
+        "type": "VARCHAR",
+        "max_length": 64
+      },
+      {
+        "name": "column_name",
+        "type": "VARCHAR",
+        "max_length": 64
+      },
+      {
+        "name": "index_type",
+        "type": "VARCHAR",
+        "max_length": 20
+      }
+    ],
+    "total_rows": 0,
+    "total_pages": 1,
+    "created_time": 1757605457.243394,
+    "last_modified": 1757605819.2353733
+  }
+}
