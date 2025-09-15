@@ -197,6 +197,7 @@
 
 如果你愿意，我可以把 **Phase 0–A1** 的最小代码骨架（文件清单 + 函数签名 + 假实现）直接给成“可运行”版本，后续你只需要替换具体实现即可。
 
+
 ```
 MoonSQL
 ├─ data
@@ -210,6 +211,8 @@ MoonSQL
 │  │  └─ __init__.py
 │  ├─ engine
 │  │  ├─ catalog_mgr.py
+│  │  ├─ constraints.py
+│  │  ├─ constraint_validator.py
 │  │  ├─ executor.py
 │  │  ├─ interfaces.py
 │  │  ├─ test_catalog_data
@@ -230,6 +233,16 @@ MoonSQL
 │  │  │  └─ test_exec.tbl
 │  │  └─ __init__.py
 │  ├─ main.py
+│  ├─ minidb_data
+│  │  ├─ departments.tbl
+│  │  ├─ employees.tbl
+│  │  ├─ sys_columns.tbl
+│  │  ├─ sys_foreign_keys.tbl
+│  │  ├─ sys_indexes.tbl
+│  │  ├─ sys_tables.tbl
+│  │  ├─ tables_metadata.json
+│  │  ├─ test_debug.tbl
+│  │  └─ test_fix.tbl
 │  ├─ sql
 │  │  ├─ lexer.py
 │  │  ├─ parser.py

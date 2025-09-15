@@ -48,14 +48,14 @@ if __name__ == "__main__":
     from sql.parser import (
         Parser, ASTNode, CreateTableNode, InsertNode, SelectNode,
         DeleteNode, ColumnDefNode, ValueNode, ColumnNode,
-        BinaryOpNode, WhereClauseNode, ParseError
-    )
+        BinaryOpNode, WhereClauseNode, ParseError, UpdateNode
+)
     from sql.semantic import SemanticAnalyzer, Catalog, SemanticError
     from sql.lexer import SqlError
 else:
     from .parser import (
         Parser, ASTNode, CreateTableNode, InsertNode, SelectNode,
-        DeleteNode, ColumnDefNode, ValueNode, ColumnNode,
+        DeleteNode, UpdateNode, ColumnDefNode, ValueNode, ColumnNode,
         BinaryOpNode, WhereClauseNode, ParseError
     )
     from .semantic import SemanticAnalyzer, Catalog, SemanticError
@@ -133,6 +133,15 @@ class Planner:
             return self._plan_select(ast)
         elif isinstance(ast, DeleteNode):
             return self._plan_delete(ast)
+        # ★ 新增：
+        elif ast.__class__.__name__ == "ShowTablesNode":
+            return self._plan_show_tables()
+        elif ast.__class__.__name__ == "DescTableNode":
+            return self._plan_desc(ast)
+        elif ast.__class__.__name__ == "AlterTableNode":
+            return self._plan_alter_table(ast)
+        elif isinstance(ast, UpdateNode):
+            return self._plan_update(ast)
         else:
             raise PlanError(ast.line, ast.col,
                             f"Unsupported statement type for planning: {type(ast).__name__}")
@@ -141,18 +150,103 @@ class Planner:
         """生成CREATE TABLE执行计划"""
         columns = []
         for col_def in node.columns:
-            columns.append({
+            # 保留约束信息
+            column_info = {
                 "name": col_def.name,
                 "type": col_def.data_type
-            })
+            }
 
-        return {
+            # 传递约束信息到Plan
+            if col_def.constraints:
+                column_info["constraints"] = col_def.constraints
+
+            columns.append(column_info)
+
+        # ★ 修复：添加table_constraints到计划
+        plan = {
             "op": "CreateTable",
             "table": node.table_name,
             "columns": columns,
             "estimated_cost": 1.0,
             "description": f"Create table '{node.table_name}' with {len(columns)} columns"
         }
+
+        # ★ 新增：传递表级约束
+        if hasattr(node, 'table_constraints') and node.table_constraints:
+            plan["table_constraints"] = node.table_constraints
+            print(f"★ PLANNER: 传递了 {len(node.table_constraints)} 个外键约束")
+
+        return plan
+
+    def _plan_update(self, node) -> Dict[str, Any]:
+        """生成UPDATE执行计划"""
+        # 构造SET字典
+        set_dict = {}
+        for clause in node.set_clauses:
+            column = clause["column"]
+            value_node = clause["value"]
+            set_dict[column] = {
+                "value": value_node.value,
+                "type": value_node.value_type
+            }
+
+        # 基础计划：扫描表
+        base_plan = {
+            "op": "SeqScan",
+            "table": node.table_name,
+            "estimated_cost": 10.0,
+            "estimated_rows": 100,
+            "description": f"Sequential scan on table '{node.table_name}'"
+        }
+
+        current_plan = base_plan
+
+        # 如果有WHERE条件，添加Filter
+        if node.where_clause:
+            filter_plan = {
+                "op": "Filter",
+                "predicate": self._serialize_condition(node.where_clause.condition),
+                "estimated_cost": current_plan["estimated_cost"] + 5.0,
+                "estimated_rows": max(1, current_plan["estimated_rows"] // 2),
+                "description": "Filter rows to update",
+                "child": current_plan
+            }
+            current_plan = filter_plan
+
+        # 最终的Update算子
+        update_plan = {
+            "op": "Update",
+            "table": node.table_name,
+            "set": set_dict,
+            "estimated_cost": current_plan["estimated_cost"] + 2.0,
+            "estimated_rows": current_plan["estimated_rows"],
+            "description": f"Update rows in table '{node.table_name}'",
+            "child": current_plan
+        }
+
+        return update_plan
+    def _plan_show_tables(self) -> Dict[str, Any]:
+        return {
+            "op": "ShowTables",
+            "description": "List user tables"
+        }
+
+    def _plan_desc(self, node) -> Dict[str, Any]:
+        return {
+            "op": "Desc",
+            "table": node.table_name,
+            "description": f"Describe table '{node.table_name}'"
+        }
+
+    def _plan_alter_table(self, node) -> Dict[str, Any]:
+        plan = {
+            "op": "AlterTable",
+            "table": node.table_name,
+            "action": node.action,
+            "payload": node.payload,
+            "description": f"Alter table '{node.table_name}' with action {node.action}"
+        }
+        return plan
 
     def _plan_insert(self, node: InsertNode) -> Dict[str, Any]:
         """生成INSERT执行计划"""
@@ -388,6 +482,7 @@ def test_planner():
             print(f"❌ {e.error_type}: {e.hint}")
         except Exception as e:
             print(f"❌ 意外错误: {e}")
+
 
 
 if __name__ == "__main__":

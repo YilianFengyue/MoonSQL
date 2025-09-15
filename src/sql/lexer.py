@@ -51,7 +51,7 @@ class Lexer:
         'AS', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'ON', 'UNION', 'ALL',
         'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'IF', 'EXISTS', 'BETWEEN', 'LIKE',
         'IN', 'IS', 'ASC', 'DESC', 'LIMIT', 'OFFSET','SHOW', 'TABLES','RENAME',
-        'TO','MODIFY','CHAR'
+        'TO','MODIFY','CHAR','CHANGE','DEFAULT','CONSTRAINT'
     }
 
     # 操作符

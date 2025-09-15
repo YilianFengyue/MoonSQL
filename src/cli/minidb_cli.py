@@ -75,7 +75,7 @@ class IntegratedMiniDBCLI:
             print("正在初始化存储引擎...")
             self.storage_engine = StorageEngine(data_dir, buffer_capacity=32, buffer_policy="LRU")
             self.catalog_manager = CatalogManager(self.storage_engine)
-            self.executor = Executor(self.storage_engine)
+            self.executor = Executor(self.storage_engine, self.catalog_manager)  # ✓ 正确传递catalog_mgr
             print("✓ B+C阶段存储引擎已加载")
         else:
             print("❌ B+C阶段存储引擎不可用")

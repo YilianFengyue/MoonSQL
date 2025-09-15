@@ -62,7 +62,7 @@ class TableInfo:
 
     def __init__(self, name: str, columns: List[Dict[str, str]]):
         self.name = name
-        self.columns = columns  # [{"name": "id", "type": "INT"}, ...]
+        self.columns = columns  # ★ 修改格式：[{"name": "id", "type": "INT", "constraints": {...}}, ...]
 
     def get_column(self, col_name: str) -> Optional[Dict[str, str]]:
         """获取列信息"""

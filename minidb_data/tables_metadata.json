@@ -1,0 +1,148 @@
+{
+  "sys_tables": {
+    "name": "sys_tables",
+    "columns": [
+      {
+        "name": "table_id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "table_name",
+        "type": "VARCHAR",
+        "max_length": 64
+      },
+      {
+        "name": "created_time",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "row_count",
+        "type": "INT",
+        "max_length": null
+      }
+    ],
+    "total_rows": 0,
+    "total_pages": 0,
+    "created_time": 1757895270.0294907,
+    "last_modified": 1757895270.0294907
+  },
+  "sys_columns": {
+    "name": "sys_columns",
+    "columns": [
+      {
+        "name": "table_id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "column_name",
+        "type": "VARCHAR",
+        "max_length": 64
+      },
+      {
+        "name": "column_type",
+        "type": "VARCHAR",
+        "max_length": 20
+      },
+      {
+        "name": "max_length",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "ordinal_position",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "constraint_flags",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "default_value",
+        "type": "VARCHAR",
+        "max_length": 100
+      }
+    ],
+    "total_rows": 0,
+    "total_pages": 0,
+    "created_time": 1757895270.0307927,
+    "last_modified": 1757895270.0307927
+  },
+  "sys_indexes": {
+    "name": "sys_indexes",
+    "columns": [
+      {
+        "name": "index_id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "table_id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "index_name",
+        "type": "VARCHAR",
+        "max_length": 64
+      },
+      {
+        "name": "column_name",
+        "type": "VARCHAR",
+        "max_length": 64
+      },
+      {
+        "name": "index_type",
+        "type": "VARCHAR",
+        "max_length": 20
+      }
+    ],
+    "total_rows": 0,
+    "total_pages": 0,
+    "created_time": 1757895270.0307927,
+    "last_modified": 1757895270.0307927
+  },
+  "sys_foreign_keys": {
+    "name": "sys_foreign_keys",
+    "columns": [
+      {
+        "name": "fk_id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "table_id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "column_name",
+        "type": "VARCHAR",
+        "max_length": 64
+      },
+      {
+        "name": "ref_table_id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "ref_column_name",
+        "type": "VARCHAR",
+        "max_length": 64
+      },
+      {
+        "name": "constraint_name",
+        "type": "VARCHAR",
+        "max_length": 128
+      }
+    ],
+    "total_rows": 0,
+    "total_pages": 0,
+    "created_time": 1757895270.065896,
+    "last_modified": 1757895270.065896
+  }
+}

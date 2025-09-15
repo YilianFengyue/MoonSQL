@@ -40,6 +40,16 @@ class TableMetadata:
 
 
 @dataclass
+class ConstraintFlags:
+    """列约束标志"""
+    not_null: bool = False
+    unique: bool = False
+    primary_key: bool = False
+    has_default: bool = False
+    default_value: Any = None
+
+
+@dataclass
 class ColumnMetadata:
     """列元数据"""
     table_id: int
@@ -47,6 +57,11 @@ class ColumnMetadata:
     column_type: str
     max_length: Optional[int]
     ordinal_position: int
+    constraints: 'ConstraintFlags' = None
+
+    def __post_init__(self):
+        if self.constraints is None:
+            self.constraints = ConstraintFlags()
 
 
 @dataclass
@@ -82,8 +97,15 @@ class CatalogManager:
         # 初始化系统目录
         self._initialize_system_catalog()
         self._load_catalog_cache()
+        # ★ 新增：初始化约束管理
+        from .constraints import ConstraintManager
+        from .constraint_validator import ConstraintValidator
+
+        self.constraint_mgr = ConstraintManager(storage_engine, self)
+        self.constraint_validator = ConstraintValidator(storage_engine, self, self.constraint_mgr)
 
         print("CatalogManager初始化完成")
+
 
     def _initialize_system_catalog(self):
         """初始化系统目录表"""
@@ -107,7 +129,9 @@ class CatalogManager:
                 {"name": "column_name", "type": "VARCHAR", "max_length": 64},
                 {"name": "column_type", "type": "VARCHAR", "max_length": 20},
                 {"name": "max_length", "type": "INT"},
-                {"name": "ordinal_position", "type": "INT"}
+                {"name": "ordinal_position", "type": "INT"},
+                {"name": "constraint_flags", "type": "INT"},
+                {"name": "default_value", "type": "VARCHAR", "max_length": 100}
             ])
 
         if self.SYS_INDEXES not in existing_tables:
@@ -135,15 +159,31 @@ class CatalogManager:
             self.table_cache[table_meta.table_name] = table_meta
             self.next_table_id = max(self.next_table_id, table_meta.table_id + 1)
 
-        # 加载列信息
+        # 加载列信息时处理约束
         for row in self.storage_engine.seq_scan(self.SYS_COLUMNS):
             table_id = row['table_id']
+
+            # 解析约束标志
+            flags_int = row.get('constraint_flags', 0)
+            default_val = row.get('default_value')
+            if default_val == "None":
+                default_val = None
+
+            constraints = ConstraintFlags(
+                not_null=bool(flags_int & 1),
+                unique=bool(flags_int & 2),
+                has_default=bool(flags_int & 4),
+                primary_key=bool(flags_int & 8),
+                default_value=default_val
+            )
+
             col_meta = ColumnMetadata(
                 table_id=table_id,
                 column_name=row['column_name'],
                 column_type=row['column_type'],
                 max_length=row['max_length'],
-                ordinal_position=row['ordinal_position']
+                ordinal_position=row['ordinal_position'],
+                constraints=constraints
             )
 
             if table_id not in self.column_cache:
@@ -202,14 +242,33 @@ class CatalogManager:
         }
         self.storage_engine.insert_row(self.SYS_TABLES, table_row)
 
-        # 插入sys_columns
+        # 插入sys_columns时处理约束
         for ordinal, col_def in enumerate(columns):
+            # 处理约束信息
+            constraints_info = col_def.get("constraints", {})
+            constraint_flags = ConstraintFlags(
+                not_null=constraints_info.get("not_null", False),
+                unique=constraints_info.get("unique", False),
+                primary_key=constraints_info.get("primary_key", False),
+                has_default="default" in constraints_info,
+                default_value=constraints_info.get("default")
+            )
+
+            flags_int = 0
+            if constraint_flags.not_null: flags_int |= 1
+            if constraint_flags.unique: flags_int |= 2
+            if constraint_flags.has_default: flags_int |= 4
+            if constraint_flags.primary_key: flags_int |= 8
+
             col_row = {
                 "table_id": table_id,
                 "column_name": col_def["name"],
                 "column_type": col_def["type"],
                 "max_length": col_def.get("max_length"),
-                "ordinal_position": ordinal
+                "ordinal_position": ordinal,
+                "constraint_flags": flags_int,
+                "default_value": str(
+                    constraint_flags.default_value) if constraint_flags.default_value is not None else None
             }
             self.storage_engine.insert_row(self.SYS_COLUMNS, col_row)
 
@@ -219,12 +278,22 @@ class CatalogManager:
 
         col_metas = []
         for ordinal, col_def in enumerate(columns):
+            constraints_info = col_def.get("constraints", {})
+            constraint_flags = ConstraintFlags(
+                not_null=constraints_info.get("not_null", False),
+                unique=constraints_info.get("unique", False),
+                primary_key=constraints_info.get("primary_key", False),
+                has_default="default" in constraints_info,
+                default_value=constraints_info.get("default")
+            )
+
             col_meta = ColumnMetadata(
                 table_id=table_id,
                 column_name=col_def["name"],
                 column_type=col_def["type"],
                 max_length=col_def.get("max_length"),
-                ordinal_position=ordinal
+                ordinal_position=ordinal,
+                constraints=constraint_flags
             )
             col_metas.append(col_meta)
 
@@ -422,6 +491,29 @@ class CatalogManager:
                 for idx in indexes
             ]
         }
+
+    # ★ 新增：约束管理方法（在CatalogManager类内部）
+    def add_foreign_key(self, table_name: str, column_name: str, ref_table_name: str, ref_column_name: str,
+                        constraint_name: str = None) -> int:
+        """添加外键约束"""
+        return self.constraint_mgr.add_foreign_key(table_name, column_name, ref_table_name, ref_column_name,
+                                                   constraint_name)
+
+    def get_table_foreign_keys(self, table_name: str):
+        """获取表的外键约束"""
+        return self.constraint_mgr.get_table_foreign_keys(table_name)
+
+    def validate_foreign_key_constraints(self, operation: str, table_name: str, row_data: Dict[str, Any],
+                                         old_row: Dict[str, Any] = None):
+        """验证外键约束"""
+        if operation == "INSERT":
+            self.constraint_validator.validate_insert_foreign_keys(table_name, row_data)
+        elif operation == "UPDATE":
+            self.constraint_validator.validate_update_foreign_keys(table_name, old_row, row_data)
+            self.constraint_validator.validate_update_referenced_keys(table_name, old_row, row_data)
+        elif operation == "DELETE":
+            self.constraint_validator.validate_delete_referenced_keys(table_name, row_data)
+
 
     def get_database_stats(self) -> Dict[str, Any]:
         """获取数据库统计信息"""
@@ -644,6 +736,7 @@ def run_all_catalog_tests():
     print("\n" + "=" * 60)
     print(f"系统目录测试完成!")
     print(f"最大表数: {table_count}, 持久化测试: {'通过' if persistence_ok else '失败'}")
+
 
 
 if __name__ == "__main__":

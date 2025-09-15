@@ -36,18 +36,32 @@ class ASTNode:
         return result
 
 class ColumnDefNode(ASTNode):
-    """列定义节点"""
-    def __init__(self, name: str, data_type: str, line: int = 0, col: int = 0):
+    """列定义节点（支持约束）"""
+    def __init__(self, name: str, data_type: str, constraints: Dict[str, Any] = None, line: int = 0, col: int = 0):
         super().__init__(line, col)
         self.name = name
         self.data_type = data_type
+        self.constraints = constraints or {}  # ★ 新增：{"primary_key": True, "not_null": True, "unique": True, "default": value}
 
 class CreateTableNode(ASTNode):
     """CREATE TABLE语句节点"""
-    def __init__(self, table_name: str, columns: List[ColumnDefNode], line: int = 0, col: int = 0):
+    def __init__(self, table_name: str, columns: List[ColumnDefNode],
+                 table_constraints: List['ForeignKeyNode'] = None, line: int = 0, col: int = 0):  # ★ 新增参数
         super().__init__(line, col)
         self.table_name = table_name
         self.columns = columns
+        self.table_constraints = table_constraints or []  # ★ 新增：表级约束
+
+# ★ 新增：外键约束节点
+class ForeignKeyNode(ASTNode):
+    """外键约束节点"""
+    def __init__(self, column_name: str, ref_table: str, ref_column: str,
+                 constraint_name: str = None, line: int = 0, col: int = 0):
+        super().__init__(line, col)
+        self.column_name = column_name
+        self.ref_table = ref_table
+        self.ref_column = ref_column
+        self.constraint_name = constraint_name
 
 class ValueNode(ASTNode):
     """值节点"""
@@ -98,6 +112,42 @@ class DeleteNode(ASTNode):
         super().__init__(line, col)
         self.table_name = table_name
         self.where_clause = where_clause
+class UpdateNode(ASTNode):
+    """UPDATE语句节点"""
+    def __init__(self, table_name: str, set_clauses: List[Dict[str, Any]], where_clause: Optional[WhereClauseNode] = None, line: int = 0, col: int = 0):
+        super().__init__(line, col)
+        self.table_name = table_name
+        self.set_clauses = set_clauses  # [{"column": "name", "value": ValueNode}, ...]
+        self.where_clause = where_clause
+
+class ShowTablesNode(ASTNode):
+    """SHOW TABLES 语句"""
+    pass
+
+
+class DescTableNode(ASTNode):
+    """DESC 表结构"""
+    def __init__(self, table_name: str, line: int = 0, col: int = 0):
+        super().__init__(line, col)
+        self.table_name = table_name
+
+
+class AlterTableNode(ASTNode):
+    """
+    ALTER TABLE 语句
+    action: one of ['RENAME', 'ADD_COLUMN', 'DROP_COLUMN', 'MODIFY_COLUMN', 'CHANGE_COLUMN']
+    payload: dict, 视 action 而定：
+        RENAME: {"new_name": str}
+        ADD_COLUMN: {"name": str, "type": str}
+        DROP_COLUMN: {"name": str}
+        MODIFY_COLUMN: {"name": str, "type": str}
+        CHANGE_COLUMN: {"old_name": str, "new_name": str, "type": str}
+    """
+    def __init__(self, table_name: str, action: str, payload: Dict[str, Any], line: int = 0, col: int = 0):
+        super().__init__(line, col)
+        self.table_name = table_name
+        self.action = action
+        self.payload = payload
 
 # ==================== 语法分析器 ====================
 
@@ -155,16 +205,24 @@ class Parser:
                 return self._parse_select()
             elif keyword == "DELETE":
                 return self._parse_delete()
+            elif keyword == "SHOW":
+                return self._parse_show_tables()
+            elif keyword == "ALTER":
+                return self._parse_alter_table()
+            elif keyword == "DESC":
+                return self._parse_desc()
+            elif keyword == "UPDATE":
+                return self._parse_update()
             else:
                 raise ParseError(self._previous().line, self._previous().col,
-                               f"Unsupported statement: {keyword}")
+                                 f"Unsupported statement: {keyword}")
         else:
             current = self._peek()
             raise ParseError(current.line, current.col,
-                           "Expected SQL statement", "CREATE, INSERT, SELECT, or DELETE")
+                             "Expected SQL statement", "CREATE, INSERT, SELECT, DELETE, SHOW, ALTER, or DESC")
 
     def _parse_create_table(self) -> CreateTableNode:
-        """解析CREATE TABLE语句"""
+        """解析CREATE TABLE语句 - ★ 支持外键约束"""
         # CREATE已经匹配，现在期望TABLE
         self._consume(TokenType.KEYWORD, "TABLE", "Expected 'TABLE'")
 
@@ -175,17 +233,25 @@ class Parser:
         # 左括号
         self._consume(TokenType.DELIMITER, "(", "Expected '(' after table name")
 
-        # 列定义列表
+        # ★ 新增：解析列定义和表级约束
         columns = []
+        table_constraints = []
+        # 至少要有一个列定义或约束
+        if self._check_foreign_key_start():
+            table_constraints.append(self._parse_foreign_key_constraint())
+        else:
+            columns.append(self._parse_column_def())
 
-        # 至少要有一个列定义
-        columns.append(self._parse_column_def())
-
-        # 处理更多列定义
+        # 处理更多列定义和约束
         while True:
             if self._check(TokenType.DELIMITER) and self._peek().lexeme == ",":
                 self._advance()  # 消费逗号
-                columns.append(self._parse_column_def())
+
+                # ★ 检查下一个是外键约束还是列定义
+                if self._check_foreign_key_start():
+                    table_constraints.append(self._parse_foreign_key_constraint())
+                else:
+                    columns.append(self._parse_column_def())
             else:
                 break
 
@@ -195,8 +261,57 @@ class Parser:
         # 分号
         self._consume(TokenType.DELIMITER, ";", "Expected ';' at end of statement")
 
-        return CreateTableNode(table_name, columns, table_token.line, table_token.col)
+        return CreateTableNode(table_name, columns, table_constraints, table_token.line, table_token.col)  # ★ 传递约束
 
+    # ★ 新增：外键检查和解析方法
+    def _check_foreign_key_start(self) -> bool:
+        """检查是否是外键约束的开始"""
+        if self._check(TokenType.KEYWORD):
+            keyword = self._peek().lexeme.upper()
+            return keyword == "FOREIGN" or keyword == "CONSTRAINT"
+        return False
+
+    def _parse_foreign_key_constraint(self) -> ForeignKeyNode:
+        """解析表级外键约束"""
+        start_token = self._peek()
+        constraint_name = None
+
+        # 可选的 CONSTRAINT name
+        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "CONSTRAINT":
+            self._advance()  # CONSTRAINT
+            name_token = self._consume(TokenType.IDENTIFIER, None, "Expected constraint name")
+            constraint_name = name_token.lexeme
+
+        # FOREIGN KEY
+        self._consume(TokenType.KEYWORD, "FOREIGN", "Expected 'FOREIGN'")
+        self._consume(TokenType.KEYWORD, "KEY", "Expected 'KEY'")
+
+        # (column_name)
+        self._consume(TokenType.DELIMITER, "(", "Expected '(' after 'FOREIGN KEY'")
+        column_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name")
+        column_name = column_token.lexeme
+        self._consume(TokenType.DELIMITER, ")", "Expected ')' after column name")
+
+        # REFERENCES
+        self._consume(TokenType.KEYWORD, "REFERENCES", "Expected 'REFERENCES'")
+
+        # ref_table(ref_column)
+        ref_table_token = self._consume(TokenType.IDENTIFIER, None, "Expected reference table name")
+        ref_table = ref_table_token.lexeme
+
+        self._consume(TokenType.DELIMITER, "(", "Expected '(' after reference table")
+        ref_column_token = self._consume(TokenType.IDENTIFIER, None, "Expected reference column name")
+        ref_column = ref_column_token.lexeme
+        self._consume(TokenType.DELIMITER, ")", "Expected ')' after reference column")
+
+        return ForeignKeyNode(
+            column_name=column_name,
+            ref_table=ref_table,
+            ref_column=ref_column,
+            constraint_name=constraint_name,
+            line=start_token.line,
+            col=start_token.col
+        )
     # 修改为：
     def _parse_column_def(self) -> ColumnDefNode:
         # 列名
@@ -204,20 +319,102 @@ class Parser:
         name = name_token.lexeme
 
         # 数据类型
-        type_token = self._consume(TokenType.KEYWORD, None, "Expected data type")
-        data_type = type_token.lexeme.upper()
+        data_type = self._parse_type_specifier()
 
-        # 支持VARCHAR(n)
+        # ★ 新增：解析列级约束
+        constraints = {}
+        while True:
+            if self._check(TokenType.KEYWORD):
+                keyword = self._peek().lexeme.upper()
+
+                if keyword == "PRIMARY":
+                    self._advance()  # PRIMARY
+                    self._consume(TokenType.KEYWORD, "KEY", "Expected 'KEY' after 'PRIMARY'")
+                    constraints["primary_key"] = True
+                    constraints["not_null"] = True  # PRIMARY KEY隐含NOT NULL
+
+                elif keyword == "NOT":
+                    self._advance()  # NOT
+                    self._consume(TokenType.KEYWORD, "NULL", "Expected 'NULL' after 'NOT'")
+                    constraints["not_null"] = True
+
+                elif keyword == "UNIQUE":
+                    self._advance()  # UNIQUE
+                    constraints["unique"] = True
+
+
+                elif keyword == "DEFAULT":
+                    self._advance()  # DEFAULT
+
+                    try:
+                        default_value = self._parse_value()
+                        constraints["default"] = default_value.value
+
+                    except ParseError as e:
+                        # ★ 改进错误信息
+                        raise ParseError(self._peek().line, self._peek().col,
+                                         f"Invalid DEFAULT value: {e.hint}", "valid default value")
+
+                else:
+                    break  # 不是约束关键字，结束解析
+            else:
+                break
+
+        return ColumnDefNode(name, data_type, constraints, name_token.line, name_token.col)
+
+    def _parse_update(self) -> UpdateNode:
+        """解析UPDATE语句"""
+        update_token = self._previous()  # UPDATE已经匹配
+
+        # 表名
+        table_token = self._consume(TokenType.IDENTIFIER, None, "Expected table name")
+        table_name = table_token.lexeme
+
+        # SET关键字
+        self._consume(TokenType.KEYWORD, "SET", "Expected 'SET'")
+
+        # SET子句列表: col1=val1, col2=val2, ...
+        set_clauses = []
+
+        # 至少一个SET子句
+        col_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name")
+        self._consume(TokenType.OPERATOR, "=", "Expected '=' after column name")
+        value = self._parse_value()
+        set_clauses.append({"column": col_token.lexeme, "value": value})
+
+        # 处理更多SET子句
+        while True:
+            if self._check(TokenType.DELIMITER) and self._peek().lexeme == ",":
+                self._advance()  # 消费逗号
+                col_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name")
+                self._consume(TokenType.OPERATOR, "=", "Expected '=' after column name")
+                value = self._parse_value()
+                set_clauses.append({"column": col_token.lexeme, "value": value})
+            else:
+                break
+
+        # 可选的WHERE子句
+        where_clause = None
+        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "WHERE":
+            self._advance()  # 消费WHERE
+            condition = self._parse_expression()
+            where_clause = WhereClauseNode(condition)
+
+        # 分号
+        self._consume(TokenType.DELIMITER, ";", "Expected ';' at end of statement")
+
+        return UpdateNode(table_name, set_clauses, where_clause, update_token.line, update_token.col)
+    def _parse_type_specifier(self) -> str:
+        """解析类型（含 VARCHAR(n)）并返回规范化字符串，例如 'INT' 或 'VARCHAR(50)'"""
+        type_tok = self._consume(TokenType.KEYWORD, None, "Expected data type")
+        data_type = type_tok.lexeme.upper()
         if data_type == "VARCHAR":
             if self._check(TokenType.DELIMITER) and self._peek().lexeme == "(":
-                self._advance()  # 消费左括号
-                size_token = self._consume(TokenType.NUMBER, None, "Expected size after VARCHAR(")
+                self._advance()
+                size_tok = self._consume(TokenType.NUMBER, None, "Expected size after VARCHAR(")
                 self._consume(TokenType.DELIMITER, ")", "Expected ')' after VARCHAR size")
-
-                # 保存完整类型信息，包含长度
-                data_type = f"VARCHAR({size_token.lexeme})"
-
-        return ColumnDefNode(name, data_type, name_token.line, name_token.col)
+                data_type = f"VARCHAR({size_tok.lexeme})"
+        return data_type
 
     def _parse_insert(self) -> InsertNode:
         """解析INSERT语句"""
@@ -337,6 +534,79 @@ class Parser:
 
         return DeleteNode(table_name, where_clause, delete_token.line, delete_token.col)
 
+    def _parse_show_tables(self) -> ShowTablesNode:
+        # SHOW 已匹配
+        # 期望 TABLES
+        self._consume(TokenType.KEYWORD, "TABLES", "Expected 'TABLES'")
+        self._consume(TokenType.DELIMITER, ";", "Expected ';' at end of statement")
+        return ShowTablesNode()
+
+    def _parse_desc(self) -> DescTableNode:
+        # DESC 已匹配
+        t = self._consume(TokenType.IDENTIFIER, None, "Expected table name after DESC")
+        self._consume(TokenType.DELIMITER, ";", "Expected ';' at end of statement")
+        return DescTableNode(t.lexeme, t.line, t.col)
+
+    def _parse_alter_table(self) -> AlterTableNode:
+        # ALTER 已匹配，期望 TABLE
+        self._consume(TokenType.KEYWORD, "TABLE", "Expected 'TABLE'")
+
+        # 表名
+        t = self._consume(TokenType.IDENTIFIER, None, "Expected table name")
+        table_name = t.lexeme
+
+        # 分派子句
+        # 1) RENAME TO new_name
+        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "RENAME":
+            self._advance()  # RENAME
+            self._consume(TokenType.KEYWORD, "TO", "Expected 'TO'")
+            new_tok = self._consume(TokenType.IDENTIFIER, None, "Expected new table name")
+            self._consume(TokenType.DELIMITER, ";", "Expected ';' at end of statement")
+            return AlterTableNode(table_name, "RENAME", {"new_name": new_tok.lexeme}, t.line, t.col)
+
+        # 2) ADD COLUMN name TYPE
+        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "ADD":
+            self._advance()  # ADD
+            self._consume(TokenType.KEYWORD, "COLUMN", "Expected 'COLUMN'")
+            col_tok = self._consume(TokenType.IDENTIFIER, None, "Expected column name")
+            data_type = self._parse_type_specifier()
+            self._consume(TokenType.DELIMITER, ";", "Expected ';' at end of statement")
+            return AlterTableNode(table_name, "ADD_COLUMN", {"name": col_tok.lexeme, "type": data_type}, t.line, t.col)
+
+        # 3) MODIFY COLUMN name TYPE
+        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "MODIFY":
+            self._advance()  # MODIFY
+            self._consume(TokenType.KEYWORD, "COLUMN", "Expected 'COLUMN'")
+            col_tok = self._consume(TokenType.IDENTIFIER, None, "Expected column name")
+            data_type = self._parse_type_specifier()
+            self._consume(TokenType.DELIMITER, ";", "Expected ';' at end of statement")
+            return AlterTableNode(table_name, "MODIFY_COLUMN", {"name": col_tok.lexeme, "type": data_type}, t.line,
+                                  t.col)
+
+        # 4) CHANGE old_name new_name TYPE
+        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "CHANGE":
+            self._advance()  # CHANGE
+            old_tok = self._consume(TokenType.IDENTIFIER, None, "Expected old column name")
+            new_tok = self._consume(TokenType.IDENTIFIER, None, "Expected new column name")
+            data_type = self._parse_type_specifier()
+            self._consume(TokenType.DELIMITER, ";", "Expected ';' at end of statement")
+            return AlterTableNode(
+                table_name, "CHANGE_COLUMN",
+                {"old_name": old_tok.lexeme, "new_name": new_tok.lexeme, "type": data_type},
+                t.line, t.col
+            )
+
+        # 5) DROP COLUMN name
+        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "DROP":
+            self._advance()  # DROP
+            self._consume(TokenType.KEYWORD, "COLUMN", "Expected 'COLUMN'")
+            col_tok = self._consume(TokenType.IDENTIFIER, None, "Expected column name")
+            self._consume(TokenType.DELIMITER, ";", "Expected ';' at end of statement")
+            return AlterTableNode(table_name, "DROP_COLUMN", {"name": col_tok.lexeme}, t.line, t.col)
+
+        raise ParseError(self._peek().line, self._peek().col,
+                         "Unsupported ALTER TABLE sub-clause",
+                         "RENAME TO / ADD COLUMN / MODIFY COLUMN / CHANGE / DROP COLUMN")
     def _parse_expression(self) -> ASTNode:
         """解析表达式"""
         left = self._parse_primary()

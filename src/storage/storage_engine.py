@@ -373,6 +373,80 @@ class StorageEngine:
 
         return deleted_count
 
+    def update_where(self, table_name: str, predicate: Callable[[Dict[str, Any]], bool],
+                     update_func: Callable[[Dict[str, Any]], Dict[str, Any]]) -> int:
+        """
+        按条件更新记录
+
+        Args:
+            table_name: 表名
+            predicate: 更新条件函数，返回True的记录将被更新
+            update_func: 更新函数，接收原记录返回新记录
+
+        Returns:
+            更新的记录数量
+
+        Raises:
+            ValueError: 表不存在
+        """
+        if table_name not in self.tables:
+            raise ValueError(f"表不存在: {table_name}")
+
+        table_info = self.tables[table_name]
+        page_ids = self.file_manager.get_all_page_ids(table_name)
+        updated_count = 0
+
+        for page_id in page_ids:
+            try:
+                page = self.buffer_pool.get_page(table_name, page_id)
+                page_modified = False
+
+                # 扫描页面中的所有活跃记录
+                for slot_id in range(page.get_slot_count()):
+                    if page.is_deleted(slot_id):
+                        continue
+
+                    try:
+                        # 读取并解码记录
+                        record_bytes = page.read(slot_id)
+                        row_data = table_info.schema.decode_row(record_bytes)
+
+                        # 检查更新条件
+                        if predicate(row_data):
+                            # 执行更新
+                            updated_row = update_func(row_data)
+
+                            # 编码更新后的记录
+                            updated_bytes = table_info.schema.encode_row(updated_row)
+
+                            # ★ 修复：删除旧记录，插入新记录
+                            page.delete(slot_id)
+                            new_slot = page.insert(updated_bytes)
+
+                            if new_slot != -1:
+                                updated_count += 1
+                                page_modified = True
+
+                    except Exception as e:
+                        print(f"更新记录失败 {table_name}.{page_id}.{slot_id}: {e}")
+                        continue
+
+                # 如果页面有修改，写回缓冲池
+                if page_modified:
+                    self.buffer_pool.put_page(table_name, page, mark_dirty=True)
+
+            except Exception as e:
+                print(f"更新操作失败 {table_name}.{page_id}: {e}")
+                continue
+
+        # 更新表统计
+        if updated_count > 0:
+            table_info.last_modified = time.time()
+            self._save_metadata()
+
+        return updated_count
+
+
     def get_table_info(self, table_name: str) -> Optional[TableInfo]:
         """获取表信息"""
         return self.tables.get(table_name)

@@ -1,0 +1,229 @@
+{
+  "sys_tables": {
+    "name": "sys_tables",
+    "columns": [
+      {
+        "name": "table_id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "table_name",
+        "type": "VARCHAR",
+        "max_length": 64
+      },
+      {
+        "name": "created_time",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "row_count",
+        "type": "INT",
+        "max_length": null
+      }
+    ],
+    "total_rows": 4,
+    "total_pages": 1,
+    "created_time": 1757728445.0017176,
+    "last_modified": 1757728929.8117366
+  },
+  "sys_columns": {
+    "name": "sys_columns",
+    "columns": [
+      {
+        "name": "table_id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "column_name",
+        "type": "VARCHAR",
+        "max_length": 64
+      },
+      {
+        "name": "column_type",
+        "type": "VARCHAR",
+        "max_length": 20
+      },
+      {
+        "name": "max_length",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "ordinal_position",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "constraint_flags",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "default_value",
+        "type": "VARCHAR",
+        "max_length": 100
+      }
+    ],
+    "total_rows": 9,
+    "total_pages": 1,
+    "created_time": 1757728445.0039241,
+    "last_modified": 1757728796.5489902
+  },
+  "sys_indexes": {
+    "name": "sys_indexes",
+    "columns": [
+      {
+        "name": "index_id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "table_id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "index_name",
+        "type": "VARCHAR",
+        "max_length": 64
+      },
+      {
+        "name": "column_name",
+        "type": "VARCHAR",
+        "max_length": 64
+      },
+      {
+        "name": "index_type",
+        "type": "VARCHAR",
+        "max_length": 20
+      }
+    ],
+    "total_rows": 0,
+    "total_pages": 0,
+    "created_time": 1757728445.0054007,
+    "last_modified": 1757728445.0054007
+  },
+  "sys_foreign_keys": {
+    "name": "sys_foreign_keys",
+    "columns": [
+      {
+        "name": "fk_id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "table_id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "column_name",
+        "type": "VARCHAR",
+        "max_length": 64
+      },
+      {
+        "name": "ref_table_id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "ref_column_name",
+        "type": "VARCHAR",
+        "max_length": 64
+      },
+      {
+        "name": "constraint_name",
+        "type": "VARCHAR",
+        "max_length": 128
+      }
+    ],
+    "total_rows": 1,
+    "total_pages": 1,
+    "created_time": 1757728445.0092382,
+    "last_modified": 1757728796.5489902
+  },
+  "departments": {
+    "name": "departments",
+    "columns": [
+      {
+        "name": "id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "name",
+        "type": "VARCHAR",
+        "max_length": 50
+      }
+    ],
+    "total_rows": 1,
+    "total_pages": 1,
+    "created_time": 1757728466.4879413,
+    "last_modified": 1757728512.1253
+  },
+  "employees": {
+    "name": "employees",
+    "columns": [
+      {
+        "name": "id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "name",
+        "type": "VARCHAR",
+        "max_length": 50
+      },
+      {
+        "name": "dept_id",
+        "type": "INT",
+        "max_length": null
+      }
+    ],
+    "total_rows": 3,
+    "total_pages": 1,
+    "created_time": 1757728488.022523,
+    "last_modified": 1757728503.4477112
+  },
+  "test_debug": {
+    "name": "test_debug",
+    "columns": [
+      {
+        "name": "id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "parent_id",
+        "type": "INT",
+        "max_length": null
+      }
+    ],
+    "total_rows": 0,
+    "total_pages": 0,
+    "created_time": 1757728640.4698007,
+    "last_modified": 1757728640.4698007
+  },
+  "test_fix": {
+    "name": "test_fix",
+    "columns": [
+      {
+        "name": "id",
+        "type": "INT",
+        "max_length": null
+      },
+      {
+        "name": "parent_id",
+        "type": "INT",
+        "max_length": null
+      }
+    ],
+    "total_rows": 1,
+    "total_pages": 1,
+    "created_time": 1757728796.5458694,
+    "last_modified": 1757728978.7075868
+  }
+}

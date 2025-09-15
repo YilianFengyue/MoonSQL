@@ -1,13 +1,15 @@
 # 文件路径: MoonSQL/src/engine/executor.py
 
 """
-Executor - SQL执行引擎
+Executor - SQL执行引擎（含 DDL: SHOW/DESC/ALTER）
 
 【功能说明】
 - 解释SQL编译器生成的Plan JSON
-- 实现五大基础算子：CreateTable, Insert, SeqScan, Filter, Project
+- 实现五大基础算子：CreateTable, Insert, SeqScan, Filter, Project, Delete
+- 新增DDL算子：ShowTables, Desc, AlterTable
 - 调用StorageEngine执行具体的数据库操作
 - 支持算子组合和流水线处理
+- 集成CatalogManager进行元数据管理
 
 【设计架构】
 SQL编译器 → Plan JSON → Executor → StorageEngine → 数据
@@ -31,6 +33,8 @@ import re
 from typing import Dict, List, Any, Iterator, Optional, Union, Callable
 from abc import ABC, abstractmethod
 
+from storage import storage_engine
+
 
 class ExecutionError(Exception):
     """执行错误"""
@@ -40,9 +44,10 @@ class ExecutionError(Exception):
 class Operator(ABC):
     """算子基类"""
 
-    def __init__(self, plan: Dict[str, Any]):
+    def __init__(self, plan: Dict[str, Any], catalog_mgr=None):
         self.plan = plan
         self.children = []
+        self.catalog_mgr = catalog_mgr
 
     @abstractmethod
     def execute(self, storage_engine) -> Iterator[Dict[str, Any]]:
@@ -60,13 +65,14 @@ class CreateTableOperator(Operator):
     def execute(self, storage_engine) -> Iterator[Dict[str, Any]]:
         table_name = self.plan.get('table')
         columns = self.plan.get('columns', [])
+        table_constraints = self.plan.get('table_constraints', [])  # ★ 新增：获取表级约束
 
         if not table_name:
             raise ExecutionError("CREATE TABLE: 缺少表名")
         if not columns:
             raise ExecutionError("CREATE TABLE: 缺少列定义")
 
-        # ★ 规范化列定义：兼容 Planner 输出的 "VARCHAR(50)"
+        # ★ 修改：规范化列定义，保留约束信息
         normalized = []
         for col in columns:
             name = col.get("name")
@@ -80,13 +86,33 @@ class CreateTableOperator(Operator):
                 col_def["type"] = "VARCHAR"
                 col_def["max_length"] = int(m.group(1))
             else:
-                # 其他类型直接传递（INT/INTEGER 等）
                 col_def["type"] = raw_type
+
+            # ★ 新增：处理约束信息
+            if "constraints" in col:
+                col_def["constraints"] = col["constraints"]
 
             normalized.append(col_def)
 
         try:
-            storage_engine.create_table(table_name, normalized)  # ★ 用 normalized
+            storage_engine.create_table(table_name, normalized)
+            # ★ 修改：传递约束信息到catalog
+            if self.catalog_mgr:
+                self.catalog_mgr.register_table(table_name, normalized)
+
+            # ★ 修复：处理外键约束 - 正确访问对象属性
+            for fk_constraint in table_constraints:
+                try:
+                    self.catalog_mgr.add_foreign_key(
+                        table_name=table_name,
+                        column_name=fk_constraint.column_name,  # ★ 修复：对象属性访问
+                        ref_table_name=fk_constraint.ref_table,  # ★ 修复：对象属性访问
+                        ref_column_name=fk_constraint.ref_column,  # ★ 修复：对象属性访问
+                        constraint_name=fk_constraint.constraint_name  # ★ 修复：对象属性访问
+                    )
+                    print(f"★ 外键约束已添加: {fk_constraint.constraint_name or 'auto_generated'}")
+                except Exception as e:
+                    raise ExecutionError(f"外键约束创建失败: {e}")
             yield {"status": "success", "message": f"表 {table_name} 创建成功"}
         except Exception as e:
             raise ExecutionError(f"CREATE TABLE失败: {e}")
@@ -123,27 +149,79 @@ class InsertOperator(Operator):
                 raise ExecutionError(f"表不存在: {table_name}")
 
             # 构造行数据
+            # 构造行数据（支持DEFAULT）
             if columns:
-                # 指定了列名: INSERT INTO table(col1,col2) VALUES (val1,val2)
+                # 指定了列名
                 if len(columns) != len(values):
                     raise ExecutionError(f"列数不匹配: {len(columns)} vs {len(values)}")
                 row_data = dict(zip(columns, values))
+
+                # ★ 新增：为未指定的列填入DEFAULT值
+                if self.catalog_mgr:
+                    all_columns = self.catalog_mgr.get_table_columns(table_name)
+                    for col in all_columns:
+                        if col.column_name not in row_data:
+                            if col.constraints.has_default:
+                                row_data[col.column_name] = col.constraints.default_value
+                            else:
+                                row_data[col.column_name] = None
             else:
-                # 未指定列名: INSERT INTO table VALUES (val1,val2,...)
+                # 未指定列名：按schema顺序填充
                 schema_columns = [col.name for col in table_info.schema.columns]
                 if len(values) != len(schema_columns):
                     raise ExecutionError(f"值数量不匹配表列数: {len(values)} vs {len(schema_columns)}")
                 row_data = dict(zip(schema_columns, values))
-
+            # 执行插入前的约束检查
+            if self.catalog_mgr:
+                self._check_constraints(table_name, row_data, storage_engine)
+                # ★ 新增：外键约束检查
+                try:
+                    self.catalog_mgr.validate_foreign_key_constraints("INSERT", table_name, row_data)
+                except Exception as e:
+                    raise ExecutionError(f"外键约束违反: {e}")
             # 执行插入
             success = storage_engine.insert_row(table_name, row_data)
             if success:
+                # ★ 可选：更新行数统计
+                if self.catalog_mgr:
+                    self.catalog_mgr.update_table_row_count(table_name, +1)
                 yield {"status": "success", "message": f"插入成功", "affected_rows": 1}
             else:
                 raise ExecutionError("插入失败")
 
         except Exception as e:
             raise ExecutionError(f"INSERT失败: {e}")
+
+    def _check_constraints(self, table_name: str, row_data: Dict[str, Any], storage_engine):
+        """检查约束"""
+        columns = self.catalog_mgr.get_table_columns(table_name)
+
+        for col in columns:
+            col_name = col.column_name
+            value = row_data.get(col_name)
+            constraints = col.constraints
+
+            # NOT NULL检查
+            if constraints.not_null and value is None:
+                raise ExecutionError(f"列 '{col_name}' 不能为NULL")
+
+            # UNIQUE/PRIMARY KEY检查 - ★ 修复：只在非NULL值时检查
+            if (constraints.unique or constraints.primary_key) and value is not None:
+                # ★ 修复：调用storage_engine而不是未定义的变量
+                if self._check_unique_value(table_name, col_name, value, storage_engine):
+                    constraint_type = "主键" if constraints.primary_key else "唯一约束"
+                    raise ExecutionError(f"{constraint_type}冲突，列'{col_name}'的值'{value}'已存在")
+
+    def _check_unique_value(self, table_name: str, column_name: str, value: Any, storage_engine) -> bool:
+        """检查唯一值冲突"""
+        try:
+            for row in storage_engine.seq_scan(table_name):
+                if row.get(column_name) == value:
+                    return True
+            return False
+        except:
+            return False
+
 
 
 class SeqScanOperator(Operator):
@@ -167,10 +245,8 @@ class SeqScanOperator(Operator):
 class FilterOperator(Operator):
     """过滤算子"""
 
-    """过滤算子"""
-
-    def __init__(self, plan: Dict[str, Any]):
-        super().__init__(plan)
+    def __init__(self, plan: Dict[str, Any], catalog_mgr=None):
+        super().__init__(plan, catalog_mgr)
         self.condition = plan.get('condition')
 
         # ★ 新增：兼容 Planner 的 predicate（字符串）
@@ -309,8 +385,8 @@ class FilterOperator(Operator):
 class ProjectOperator(Operator):
     """投影算子"""
 
-    def __init__(self, plan: Dict[str, Any]):
-        super().__init__(plan)
+    def __init__(self, plan: Dict[str, Any], catalog_mgr=None):
+        super().__init__(plan, catalog_mgr)
         self.columns = plan.get('columns', [])
         if not self.columns:
             raise ExecutionError("Project: 缺少投影列")
@@ -339,8 +415,8 @@ class ProjectOperator(Operator):
 class DeleteOperator(Operator):
     """DELETE 算子"""
 
-    def __init__(self, plan: Dict[str, Any]):
-        super().__init__(plan)
+    def __init__(self, plan: Dict[str, Any], catalog_mgr=None):
+        super().__init__(plan, catalog_mgr)
         # 可能没有直接给 condition，先记录；不要抛错
         self.condition = plan.get('condition')
         # 不在这里解析/报错，执行时会从 child Filter 兜底
@@ -359,6 +435,23 @@ class DeleteOperator(Operator):
                 if isinstance(child, FilterOperator):
                     cond = child.condition
 
+            # ★ 新增：删除前的外键约束检查
+            if self.catalog_mgr:
+                # 先扫描要删除的行，检查外键约束
+                for row in storage_engine.seq_scan(table_name):
+                    should_delete = False
+                    if cond:
+                        should_delete = FilterOperator({"condition": cond})._evaluate_condition(row, cond)
+                    else:
+                        should_delete = True
+
+                    if should_delete:
+                        try:
+                            self.catalog_mgr.validate_foreign_key_constraints("DELETE", table_name, row)
+                        except Exception as e:
+                            raise ExecutionError(f"外键约束违反: {e}")
+
+            # ★ 原有删除逻辑保持不变
             if cond:
                 def predicate(row):
                     return FilterOperator({"condition": cond})._evaluate_condition(row, cond)
@@ -366,6 +459,10 @@ class DeleteOperator(Operator):
                 deleted_count = storage_engine.delete_where(table_name, predicate)
             else:
                 deleted_count = storage_engine.delete_where(table_name, lambda row: True)
+
+            # 可选：更新行数统计
+            if self.catalog_mgr and deleted_count:
+                self.catalog_mgr.update_table_row_count(table_name, -deleted_count)
 
             yield {"status": "success", "message": f"删除成功", "affected_rows": deleted_count}
 
@@ -378,11 +475,304 @@ class DeleteOperator(Operator):
         return filter_op._evaluate_condition(row, condition)
 
 
-class Executor:
-    """SQL执行引擎"""
+class UpdateOperator(Operator):
+    """UPDATE 算子"""
 
-    def __init__(self, storage_engine):
+    def __init__(self, plan: Dict[str, Any], catalog_mgr=None):
+        super().__init__(plan, catalog_mgr)
+        self.set_dict = plan.get('set', {})
+        self.condition = plan.get('condition')
+
+    def execute(self, storage_engine) -> Iterator[Dict[str, Any]]:
+        """执行更新操作"""
+        table_name = self.plan.get('table')
+
+        if not table_name:
+            raise ExecutionError("UPDATE: 缺少表名")
+        if not self.set_dict:
+            raise ExecutionError("UPDATE: 缺少SET子句")
+
+        try:
+            cond = self.condition
+            if cond is None and self.children:
+                child = self.children[0]
+                if isinstance(child, FilterOperator):
+                    cond = child.condition
+
+                # ★ 修改：构造更新函数，加入约束检查
+
+            def update_func(row):
+                updated_row = dict(row)
+                for column, value_info in self.set_dict.items():
+                    updated_row[column] = value_info['value']
+
+                # ★ 新增：外键约束检查
+                if self.catalog_mgr:
+                    try:
+                        self.catalog_mgr.validate_foreign_key_constraints("UPDATE", table_name, updated_row, row)
+                    except Exception as e:
+                        raise ExecutionError(f"外键约束违反: {e}")
+
+                return updated_row
+
+            if cond:
+                def predicate(row):
+                    return FilterOperator({"condition": cond})._evaluate_condition(row, cond)
+
+                updated_count = storage_engine.update_where(table_name, predicate, update_func)
+            else:
+                # 全表更新
+                updated_count = storage_engine.update_where(table_name, lambda row: True, update_func)
+
+            yield {"status": "success", "message": f"更新成功", "affected_rows": updated_count}
+
+        except Exception as e:
+            raise ExecutionError(f"UPDATE失败: {e}")
+
+# -------------------- 新增：DDL算子 --------------------
+
+class ShowTablesOperator(Operator):
+    """SHOW TABLES 算子：返回一列 table"""
+
+    def execute(self, storage_engine) -> Iterator[Dict[str, Any]]:
+        try:
+            if self.catalog_mgr:
+                names = self.catalog_mgr.list_all_tables()
+            else:
+                # 兜底（不排系统表）
+                names = storage_engine.list_tables()
+            for n in names:
+                yield {"table": n}
+        except Exception as e:
+            raise ExecutionError(f"SHOW TABLES失败: {e}")
+
+
+class DescOperator(Operator):
+    """DESC 表结构：每行一个列定义"""
+
+    def execute(self, storage_engine) -> Iterator[Dict[str, Any]]:
+        table = self.plan.get("table")
+        if not table:
+            raise ExecutionError("DESC: 缺少表名")
+        try:
+            if not self.catalog_mgr:
+                raise ExecutionError("DESC 需要 CatalogManager 支持")
+            schema = self.catalog_mgr.get_schema_info(table)
+            if not schema:
+                raise ExecutionError(f"表不存在: {table}")
+            for col in schema["columns"]:
+                yield {
+                    "Field": col["name"],
+                    "Type": f"{col['type']}" + (f"({col['max_length']})" if col.get("max_length") else ""),
+                    "Position": col["position"]
+                }
+        except Exception as e:
+            raise ExecutionError(f"DESC失败: {e}")
+
+
+class AlterTableOperator(Operator):
+    """ALTER TABLE 算子：通过"重写法"实现"""
+
+    def execute(self, storage_engine) -> Iterator[Dict[str, Any]]:
+        table = self.plan.get("table")
+        action = self.plan.get("action")
+        payload = self.plan.get("payload", {}) or {}
+
+        if not table or not action:
+            raise ExecutionError("ALTER: 缺少参数")
+
+        if not self.catalog_mgr:
+            raise ExecutionError("ALTER 需要 CatalogManager 支持")
+
+        # 读取当前列定义
+        schema = self.catalog_mgr.get_schema_info(table)
+        if not schema:
+            raise ExecutionError(f"表不存在: {table}")
+
+        old_cols = schema["columns"]  # list of dict{name,type,max_length,position}
+        # 规范化为简洁 [{name, type, max_length}]
+        cols_norm = [{"name": c["name"], "type": c["type"], "max_length": c.get("max_length")} for c in old_cols]
+
+        # 分派动作
+        if action == "RENAME":
+            new_name = payload.get("new_name")
+            if not new_name:
+                raise ExecutionError("RENAME: 缺少 new_name")
+
+            self._rewrite_table(storage_engine, table, cols_norm, new_name,
+                                lambda row: row)  # 逐行原样复制
+            # 更新目录：旧表注销，新表登记
+            self.catalog_mgr.unregister_table(table)
+            self.catalog_mgr.register_table(new_name, cols_norm)
+            # 行数回填
+            row_count = 0
+            for _ in storage_engine.seq_scan(new_name):
+                row_count += 1
+            if row_count:
+                self.catalog_mgr.update_table_row_count(new_name, row_count)
+            yield {"status": "success", "message": f"表已重命名为 {new_name}"}
+            return
+
+        # 组装新列定义
+        def type_to_dict(t: str) -> Dict[str, Any]:
+            t = (t or "").upper()
+            if t.startswith("VARCHAR("):
+                m = re.match(r"VARCHAR\((\d+)\)", t)
+                if not m:
+                    raise ExecutionError(f"无效的类型: {t}")
+                return {"type": "VARCHAR", "max_length": int(m.group(1))}
+            return {"type": t, "max_length": None}
+
+        if action == "ADD_COLUMN":
+            name = payload.get("name")
+            t = payload.get("type")
+            if not name or not t:
+                raise ExecutionError("ADD COLUMN: 缺少 name 或 type")
+            new_cols = cols_norm + [{"name": name, **type_to_dict(t)}]
+
+            def mapper(row):
+                new_row = dict(row)
+                new_row[name] = None  # 默认 NULL
+                return new_row
+
+            self._rewrite_table(storage_engine, table, new_cols, table, mapper)
+            # 目录：先注销再登记（保持位置序号）
+            self.catalog_mgr.unregister_table(table)
+            self.catalog_mgr.register_table(table, new_cols)
+            # 行数保持
+            self._sync_row_count(table, storage_engine)
+            yield {"status": "success", "message": f"已添加列 {name}"}
+            return
+
+        if action == "DROP_COLUMN":
+            name = payload.get("name")
+            if not name:
+                raise ExecutionError("DROP COLUMN: 缺少 name")
+            exists = any(c["name"] == name for c in cols_norm)
+            if not exists:
+                raise ExecutionError(f"列不存在: {name}")
+            new_cols = [c for c in cols_norm if c["name"] != name]
+
+            def mapper(row):
+                new_row = dict(row)
+                new_row.pop(name, None)
+                return new_row
+
+            self._rewrite_table(storage_engine, table, new_cols, table, mapper)
+            self.catalog_mgr.unregister_table(table)
+            self.catalog_mgr.register_table(table, new_cols)
+            self._sync_row_count(table, storage_engine)
+            yield {"status": "success", "message": f"已删除列 {name}"}
+            return
+
+        if action == "MODIFY_COLUMN":
+            name = payload.get("name")
+            t = payload.get("type")
+            if not name or not t:
+                raise ExecutionError("MODIFY COLUMN: 缺少 name 或 type")
+            found = False
+            new_cols = []
+            for c in cols_norm:
+                if c["name"] == name:
+                    new_cols.append({"name": name, **type_to_dict(t)})
+                    found = True
+                else:
+                    new_cols.append(c)
+            if not found:
+                raise ExecutionError(f"列不存在: {name}")
+
+            def mapper(row):
+                # 数据不强转，保持原值
+                return dict(row)
+
+            self._rewrite_table(storage_engine, table, new_cols, table, mapper)
+            self.catalog_mgr.unregister_table(table)
+            self.catalog_mgr.register_table(table, new_cols)
+            self._sync_row_count(table, storage_engine)
+            yield {"status": "success", "message": f"已修改列 {name} 类型为 {t}"}
+            return
+
+        if action == "CHANGE_COLUMN":
+            old_name = payload.get("old_name")
+            new_name = payload.get("new_name")
+            t = payload.get("type")
+            if not old_name or not new_name or not t:
+                raise ExecutionError("CHANGE COLUMN: 缺少 old_name/new_name/type")
+            exists = any(c["name"] == old_name for c in cols_norm)
+            if not exists:
+                raise ExecutionError(f"列不存在: {old_name}")
+            new_cols = []
+            for c in cols_norm:
+                if c["name"] == old_name:
+                    new_cols.append({"name": new_name, **type_to_dict(t)})
+                else:
+                    new_cols.append(c)
+
+            def mapper(row):
+                new_row = dict(row)
+                if old_name in new_row:
+                    new_row[new_name] = new_row.pop(old_name)
+                else:
+                    new_row[new_name] = None
+                return new_row
+
+            self._rewrite_table(storage_engine, table, new_cols, table, mapper)
+            self.catalog_mgr.unregister_table(table)
+            self.catalog_mgr.register_table(table, new_cols)
+            self._sync_row_count(table, storage_engine)
+            yield {"status": "success", "message": f"已将列 {old_name} 重命名为 {new_name} 并修改类型为 {t}"}
+            return
+
+        raise ExecutionError(f"不支持的 ALTER 操作: {action}")
+
+    # ---------- 工具函数 ----------
+
+    def _rewrite_table(self, storage_engine, src_table: str,
+                       target_cols: List[Dict[str, Any]],
+                       dest_table: str,
+                       row_mapper: Callable[[Dict[str, Any]], Dict[str, Any]]):
+        """
+        重写法：通过一个临时表搬运数据，从 src_table -> 临时表 -> （可选重建）dest_table
+        """
+        tmp = f"__alter_tmp_{src_table}"
+        # 1) 建临时表（按新列定义）
+        storage_engine.create_table(tmp, target_cols)
+        # 2) 复制并映射
+        for row in storage_engine.seq_scan(src_table):
+            storage_engine.insert_row(tmp, row_mapper(row))
+        # 3) 删除目标表（如果目标名与源相同则先删源）
+        if dest_table == src_table:
+            storage_engine.drop_table(src_table)
+            # 重新创建 dest_table
+            storage_engine.create_table(dest_table, target_cols)
+            # 从 tmp 回填到 dest
+            for row in storage_engine.seq_scan(tmp):
+                storage_engine.insert_row(dest_table, row)
+            # 清理 tmp
+            storage_engine.drop_table(tmp)
+        else:
+            # 目标不同名（RENAME）
+            storage_engine.create_table(dest_table, target_cols)
+            for row in storage_engine.seq_scan(tmp):
+                storage_engine.insert_row(dest_table, row)
+            storage_engine.drop_table(tmp)
+            storage_engine.drop_table(src_table)
+
+    def _sync_row_count(self, table: str, storage_engine):
+        cnt = 0
+        for _ in storage_engine.seq_scan(table):
+            cnt += 1
+        if self.catalog_mgr:
+            # 因为 register_table 初始 row_count=0，所以直接 +cnt
+            self.catalog_mgr.update_table_row_count(table, cnt)
+
+
+class Executor:
+    """SQL执行引擎（支持 SHOW/DESC/ALTER）"""
+
+    def __init__(self, storage_engine, catalog_mgr=None):
         self.storage_engine = storage_engine
+        self.catalog_mgr = catalog_mgr
 
         # 算子工厂
         self.operator_classes = {
@@ -391,7 +781,12 @@ class Executor:
             'SeqScan': SeqScanOperator,
             'Filter': FilterOperator,
             'Project': ProjectOperator,
-            'Delete': DeleteOperator
+            'Delete': DeleteOperator,
+            'Update': UpdateOperator,
+            # ★ 新增DDL算子
+            'ShowTables': ShowTablesOperator,
+            'Desc': DescOperator,
+            'AlterTable': AlterTableOperator,
         }
 
     def execute(self, plan: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
@@ -426,7 +821,7 @@ class Executor:
 
         # 创建算子
         operator_class = self.operator_classes[op_type]
-        operator = operator_class(plan)
+        operator = operator_class(plan, catalog_mgr=self.catalog_mgr)
 
         # 递归构建子算子
         child_plan = plan.get('child')
@@ -693,6 +1088,66 @@ def test_complex_conditions():
     storage.close()
 
 
+def test_ddl_operations():
+    """测试DDL操作（需要CatalogManager）"""
+    print("\n=== DDL操作测试 ===")
+
+    try:
+        from ..storage.storage_engine import StorageEngine
+    except ImportError:
+        import sys
+        import os
+        sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'storage'))
+        from src.storage.storage_engine import StorageEngine
+
+    # 尝试导入CatalogManager
+    try:
+        from ..catalog.catalog_manager import CatalogManager
+        catalog_mgr = CatalogManager("test_catalog_data")
+        print("   找到CatalogManager，启用完整DDL测试")
+    except ImportError:
+        catalog_mgr = None
+        print("   未找到CatalogManager，跳过DDL测试")
+        return
+
+    storage = StorageEngine("test_ddl_data", buffer_capacity=4)
+    executor = Executor(storage, catalog_mgr)
+
+    # 测试SHOW TABLES
+    print("\n1. 测试SHOW TABLES:")
+    show_plan = {"op": "ShowTables"}
+    results = executor.execute_simple(show_plan)
+    for result in results:
+        print(f"   {result}")
+
+    # 创建测试表
+    if catalog_mgr and "test_ddl" in catalog_mgr.list_all_tables():
+        storage.drop_table("test_ddl")
+        catalog_mgr.unregister_table("test_ddl")
+
+    create_plan = {
+        "op": "CreateTable",
+        "table": "test_ddl",
+        "columns": [
+            {"name": "id", "type": "INT"},
+            {"name": "name", "type": "VARCHAR", "max_length": 50}
+        ]
+    }
+    executor.execute_simple(create_plan)
+
+    # 测试DESC
+    print("\n2. 测试DESC:")
+    desc_plan = {"op": "Desc", "table": "test_ddl"}
+    results = executor.execute_simple(desc_plan)
+    for result in results:
+        print(f"   {result}")
+
+    print("\n   DDL功能测试完成")
+    storage.close()
+    if catalog_mgr:
+        catalog_mgr.close()
+
+
 def run_all_executor_tests():
     """运行所有执行引擎测试"""
     print("Executor 执行引擎测试")
@@ -700,6 +1155,7 @@ def run_all_executor_tests():
 
     remaining_rows = test_executor_basic()
     test_complex_conditions()
+    test_ddl_operations()
 
     print("\n" + "=" * 60)
     print(f"执行引擎测试完成! 最终表剩余{remaining_rows}行记录")
