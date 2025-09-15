@@ -419,6 +419,16 @@ class Planner:
         }
 
 
+    def _find_scan_table(self, plan_node: Dict[str, Any]) -> Optional[str]:
+        """
+        从计划树向下找到最底层的 SeqScan.table 名字。
+        """
+        node = plan_node
+        while isinstance(node, dict):
+            if node.get("op") == "SeqScan":
+                return node.get("table")
+            node = node.get("child")
+        return None
 
     # ======== 【新增】聚合收集/重写/校验工具 ========
 
@@ -558,36 +568,73 @@ class Planner:
                 raise ValueError(f"Column '{col_name}' must appear in GROUP BY clause or be an aggregate function")
 
     def _generate_sort_plan(self, order_by_node, child_plan: Dict[str, Any]) -> Dict[str, Any]:
-        """★ 新增：生成排序计划"""
+        """生成排序计划 + 在计划阶段校验 ORDER BY 列是否存在"""
 
-        # ★ 转换排序键（处理列序号和别名）
+        # 1) 先计算可引用的列名集合：输出别名 + 表真实列
+        selectable_aliases = set()
+        base_table_cols = set()
+
+        # 如果上游是 Project，则拿到 SELECT 列及其别名
+        if child_plan.get("op") == "Project":
+            proj_cols = child_plan.get("columns", [])
+            # 可能包含：字符串列名、{"name":..., "alias":...}、以及 "*"（少见）
+            for c in proj_cols:
+                if isinstance(c, dict):
+                    # 允许使用别名排序
+                    alias = c.get("alias")
+                    if alias:
+                        selectable_aliases.add(alias)
+                    # 也允许用原列名（不少教材/实现允许）
+                    name = c.get("name")
+                    if name:
+                        selectable_aliases.add(name)
+                elif isinstance(c, str):
+                    if c != "*":
+                        selectable_aliases.add(c)
+            # 如果包含 "*"，需要补全表全列
+            if "*" in proj_cols or any(isinstance(c, str) and c == "*" for c in proj_cols):
+                scan_table = self._find_scan_table(child_plan)
+                if scan_table and self.catalog.table_exists(scan_table):
+                    base_table_cols = set(self.catalog.get_table(scan_table).get_column_names())
+        else:
+            # 无 Project（例如 SELECT *），则直接用底层表列
+            scan_table = self._find_scan_table(child_plan)
+            if scan_table and self.catalog.table_exists(scan_table):
+                base_table_cols = set(self.catalog.get_table(scan_table).get_column_names())
+
+        # 2) 校验每个排序键
         sort_keys = []
         for key_spec in order_by_node.sort_keys:
             column = key_spec["column"]
             order = key_spec["order"]
 
-            # ★ 处理列序号：__pos_1 → 转换为实际列名
-            if column.startswith("__pos_"):
-                pos_str = column[6:]  # 去掉"__pos_"前缀
+            # 列序号占位（ORDER BY 1,2...）保持现状，不在此处报错
+            if isinstance(column, str) and column.startswith("__pos_"):
+                # 仍然转换为 __position_N，由执行器或后续阶段解析
+                pos_str = column[6:]
                 try:
                     pos = int(pos_str)
-                    # 这里简化处理：由执行器根据投影列顺序解析
-                    # 实际项目中可以在此阶段就解析为实际列名
                     column = f"__position_{pos}"
                 except ValueError:
-                    raise ValueError(f"Invalid column position: {pos_str}")
+                    raise PlanError(order_by_node.line, order_by_node.col,
+                                    f"Invalid ORDER BY position: {pos_str}")
+            else:
+                # 普通列名或别名：必须存在于 “别名集合 ∪ 表列集合” 里
+                if (column not in selectable_aliases) and (column not in base_table_cols):
+                    raise PlanError(order_by_node.line, order_by_node.col,
+                                    f"ORDER BY column '{column}' does not exist")
 
             sort_keys.append({"column": column, "order": order})
 
+        # 3) 生成 Sort 计划
         sort_plan = {
             "op": "Sort",
             "keys": sort_keys,
-            "estimated_cost": child_plan["estimated_cost"] + child_plan["estimated_rows"] * 0.1,  # O(n log n)
+            "estimated_cost": child_plan["estimated_cost"] + child_plan["estimated_rows"] * 0.1,
             "estimated_rows": child_plan["estimated_rows"],
             "description": f"Sort by {len(sort_keys)} keys",
             "child": child_plan
         }
-
         return sort_plan
 
     def _generate_limit_plan(self, limit_node, child_plan: Dict[str, Any]) -> Dict[str, Any]:
