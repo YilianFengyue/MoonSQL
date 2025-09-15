@@ -38,6 +38,9 @@ from abc import ABC, abstractmethod
 from src.sql.expressions import ExpressionEvaluator, ExpressionError
 from src.engine.distinct import DistinctOperator as BaseDistinctOperator
 
+from src.engine.aggregate import GroupAggregateOperator
+from src.engine.sort import SortOperator, LimitOperator
+
 class ExecutionError(Exception):
     """执行错误"""
     pass
@@ -805,16 +808,78 @@ class AlterTableOperator(Operator):
             # 因为 register_table 初始 row_count=0，所以直接 +cnt
             self.catalog_mgr.update_table_row_count(table, cnt)
 
+# ==================== 兼容性扩展：为新算子添加基类接口 ====================
+
+# ★ 新增：为新算子添加兼容性基类方法
+
+class GroupAggregateOperatorWrapper(Operator):
+    """分组聚合算子包装器（兼容Operator基类）"""
+
+    def __init__(self, plan: Dict[str, Any], catalog_mgr=None):
+        super().__init__(plan, catalog_mgr)
+        self.inner_operator = GroupAggregateOperator(plan, catalog_mgr)
+
+    def execute(self, storage_engine) -> Iterator[Dict[str, Any]]:
+        """执行聚合操作"""
+        if not self.children:
+            raise ExecutionError("GroupAggregate: 缺少子算子")
+
+        # 获取子算子结果
+        child_results = self.children[0].execute(storage_engine)
+
+        # 执行聚合
+        for result in self.inner_operator.execute(child_results):
+            yield result
+
+
+class SortOperatorWrapper(Operator):
+    """排序算子包装器（兼容Operator基类）"""
+
+    def __init__(self, plan: Dict[str, Any], catalog_mgr=None):
+        super().__init__(plan, catalog_mgr)
+        self.inner_operator = SortOperator(plan, catalog_mgr)
+
+    def execute(self, storage_engine) -> Iterator[Dict[str, Any]]:
+        """执行排序操作"""
+        if not self.children:
+            raise ExecutionError("Sort: 缺少子算子")
+
+        # 获取子算子结果
+        child_results = self.children[0].execute(storage_engine)
+
+        # 执行排序
+        for result in self.inner_operator.execute(child_results):
+            yield result
+
+
+class LimitOperatorWrapper(Operator):
+    """分页算子包装器（兼容Operator基类）"""
+
+    def __init__(self, plan: Dict[str, Any], catalog_mgr=None):
+        super().__init__(plan, catalog_mgr)
+        self.inner_operator = LimitOperator(plan, catalog_mgr)
+
+    def execute(self, storage_engine) -> Iterator[Dict[str, Any]]:
+        """执行分页操作"""
+        if not self.children:
+            raise ExecutionError("Limit: 缺少子算子")
+
+        # 获取子算子结果
+        child_results = self.children[0].execute(storage_engine)
+
+        # 执行分页
+        for result in self.inner_operator.execute(child_results):
+            yield result
 
 class Executor:
-    """SQL执行引擎（支持 SHOW/DESC/ALTER）"""
+    """SQL执行引擎（支持聚合+排序+分页）"""
 
     def __init__(self, storage_engine, catalog_mgr=None):
-        """★ 替换：Executor构造函数，添加新算子"""
+        """★ 替换：Executor构造函数，添加S6+S7算子"""
         self.storage_engine = storage_engine
         self.catalog_mgr = catalog_mgr
 
-        # ★ 修改：算子工厂添加DISTINCT
+        # ★ 修改：算子工厂添加聚合、排序、分页算子
         self.operator_classes = {
             'CreateTable': CreateTableOperator,
             'Insert': InsertOperator,
@@ -823,36 +888,59 @@ class Executor:
             'Project': ProjectOperator,
             'Delete': DeleteOperator,
             'Update': UpdateOperator,
-            'Distinct': DistinctOperator,  # ★ 新增
+            'Distinct': DistinctOperator,
+            # ★ 修改：使用包装器类
+            'GroupAggregate': GroupAggregateOperatorWrapper,
+            'Sort': SortOperatorWrapper,
+            'Limit': LimitOperatorWrapper,
             # DDL算子
             'ShowTables': ShowTablesOperator,
             'Desc': DescOperator,
             'AlterTable': AlterTableOperator,
         }
 
+    def _create_group_aggregate_operator(self, plan: Dict[str, Any]) -> 'GroupAggregateOperator':
+        """★ 新增：创建分组聚合算子"""
+        return GroupAggregateOperator(plan, self.catalog_mgr)
+
+    def _create_sort_operator(self, plan: Dict[str, Any]) -> 'SortOperator':
+        """★ 新增：创建排序算子"""
+        return SortOperator(plan, self.catalog_mgr)
+
+    def _create_limit_operator(self, plan: Dict[str, Any]) -> 'LimitOperator':
+        """★ 新增：创建分页算子"""
+        return LimitOperator(plan, self.catalog_mgr)
+
     def execute(self, plan: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
         """
-        执行计划
-
-        Args:
-            plan: 执行计划JSON
-
-        Yields:
-            执行结果行
+        执行计划（支持S6+S7新算子）
         """
         try:
             # 构建算子树
             root_operator = self._build_operator_tree(plan)
 
-            # 执行并返回结果
-            for result in root_operator.execute(self.storage_engine):
-                yield result
+            # ★ 修改：适配新算子的execute接口
+            if hasattr(root_operator, 'execute'):
+                if isinstance(root_operator, (GroupAggregateOperator, SortOperator, LimitOperator)):
+                    # ★ 新算子：需要传入子算子结果
+                    if root_operator.children:
+                        child_results = root_operator.children[0].execute(self.storage_engine)
+                        for result in root_operator.execute(child_results):
+                            yield result
+                    else:
+                        raise ExecutionError(f"{type(root_operator).__name__} requires child operator")
+                else:
+                    # 传统算子：直接执行
+                    for result in root_operator.execute(self.storage_engine):
+                        yield result
+            else:
+                raise ExecutionError(f"Operator {type(root_operator).__name__} missing execute method")
 
         except Exception as e:
             raise ExecutionError(f"执行失败: {e}")
 
     def _build_operator_tree(self, plan: Dict[str, Any]) -> Operator:
-        """构建算子树"""
+        """构建算子树（支持S6+S7新算子）"""
         op_type = plan.get('op')
         if not op_type:
             raise ExecutionError("计划缺少操作类型")
@@ -860,9 +948,15 @@ class Executor:
         if op_type not in self.operator_classes:
             raise ExecutionError(f"不支持的操作类型: {op_type}")
 
-        # 创建算子
-        operator_class = self.operator_classes[op_type]
-        operator = operator_class(plan, catalog_mgr=self.catalog_mgr)
+        # ★ 修改：支持工厂函数和类两种方式
+        operator_factory = self.operator_classes[op_type]
+
+        if callable(operator_factory) and not isinstance(operator_factory, type):
+            # 工厂函数（新算子）
+            operator = operator_factory(plan)
+        else:
+            # 传统类构造（现有算子）
+            operator = operator_factory(plan, catalog_mgr=self.catalog_mgr)
 
         # 递归构建子算子
         child_plan = plan.get('child')
@@ -1339,5 +1433,188 @@ def run_all_executor_tests():
     print(f"执行引擎测试完成! 最终表剩余{remaining_rows}行记录")
 
 
+def test_s6s7_executor_integration():
+    """测试S6+S7执行器集成"""
+    print("=== S6+S7 Executor集成测试 ===")
+
+    # 导入依赖
+    try:
+        from src.storage.storage_engine import StorageEngine
+        from src.engine.catalog_mgr import CatalogManager
+    except ImportError:
+        print("❌ 无法导入依赖，跳过测试")
+        return
+
+    # 创建测试环境
+    storage = StorageEngine("test_s6s7_data", buffer_capacity=8)
+    catalog = CatalogManager(storage)
+    executor = Executor(storage, catalog)
+
+    print("\n1. 创建测试表:")
+    create_plan = {
+        "op": "CreateTable",
+        "table": "employees",
+        "columns": [
+            {"name": "id", "type": "INT"},
+            {"name": "name", "type": "VARCHAR", "max_length": 50},
+            {"name": "dept", "type": "VARCHAR", "max_length": 20},
+            {"name": "salary", "type": "INT"},
+            {"name": "age", "type": "INT"}
+        ]
+    }
+
+    results = list(executor.execute(create_plan))
+    print(f"   建表结果: {results[0]['status']}")
+
+    print("\n2. 插入测试数据:")
+    test_data = [
+        {"id": 1, "name": "Alice", "dept": "Engineering", "salary": 75000, "age": 25},
+        {"id": 2, "name": "Bob", "dept": "Sales", "salary": 65000, "age": 30},
+        {"id": 3, "name": "Charlie", "dept": "Engineering", "salary": 80000, "age": 28},
+        {"id": 4, "name": "Diana", "dept": "Sales", "salary": 70000, "age": 26},
+        {"id": 5, "name": "Eve", "dept": "Engineering", "salary": 85000, "age": 30},
+    ]
+
+    for data in test_data:
+        insert_plan = {
+            "op": "Insert",
+            "table": "employees",
+            "values": [{"value": v, "type": "NUMBER" if isinstance(v, int) else "STRING"}
+                       for v in data.values()]
+        }
+        list(executor.execute(insert_plan))
+
+    print(f"   插入{len(test_data)}行数据")
+
+    print("\n3. 测试聚合查询:")
+    # 分组聚合：SELECT dept, COUNT(*), AVG(salary) FROM employees GROUP BY dept
+    agg_plan = {
+        "op": "GroupAggregate",
+        "group_keys": ["dept"],
+        "aggregates": [
+            {"func": "COUNT", "column": "*", "alias": "cnt"},
+            {"func": "AVG", "column": "salary", "alias": "avg_salary"}
+        ],
+        "child": {
+            "op": "SeqScan",
+            "table": "employees"
+        }
+    }
+
+    agg_results = list(executor.execute(agg_plan))
+    print(f"   聚合结果: {len(agg_results)}组")
+    for result in agg_results:
+        print(f"     {result}")
+
+    print("\n4. 测试排序查询:")
+    # 排序：SELECT * FROM employees ORDER BY salary DESC
+    sort_plan = {
+        "op": "Sort",
+        "keys": [{"column": "salary", "order": "DESC"}],
+        "child": {
+            "op": "SeqScan",
+            "table": "employees"
+        }
+    }
+
+    sort_results = list(executor.execute(sort_plan))
+    print(f"   排序结果: {len(sort_results)}行")
+    print("   薪水排序（降序）:")
+    for result in sort_results[:3]:  # 显示前3行
+        print(f"     {result['name']}: {result['salary']}")
+
+    print("\n5. 测试分页查询:")
+    # 分页：上一个排序结果的第2-3行
+    limit_plan = {
+        "op": "Limit",
+        "offset": 1,
+        "count": 2,
+        "child": sort_plan
+    }
+
+    limit_results = list(executor.execute(limit_plan))
+    print(f"   分页结果: {len(limit_results)}行（跳过1行，取2行）")
+    for result in limit_results:
+        print(f"     {result['name']}: {result['salary']}")
+
+    print("\n6. 测试复合查询:")
+    # 复合：聚合+排序+分页
+    complex_plan = {
+        "op": "Limit",
+        "offset": 0,
+        "count": 1,
+        "child": {
+            "op": "Sort",
+            "keys": [{"column": "avg_salary", "order": "DESC"}],
+            "child": {
+                "op": "GroupAggregate",
+                "group_keys": ["dept"],
+                "aggregates": [
+                    {"func": "COUNT", "column": "*", "alias": "cnt"},
+                    {"func": "AVG", "column": "salary", "alias": "avg_salary"}
+                ],
+                "child": {
+                    "op": "SeqScan",
+                    "table": "employees"
+                }
+            }
+        }
+    }
+
+    complex_results = list(executor.execute(complex_plan))
+    print(f"   复合查询结果: {len(complex_results)}行")
+    for result in complex_results:
+        print(f"     {result}")
+
+    # 清理
+    storage.close()
+    print("\n✓ S6+S7执行器集成测试完成")
+
+
+def test_executor_error_handling():
+    """测试执行器错误处理"""
+    print("\n=== 执行器错误处理测试 ===")
+
+    try:
+        from src.storage.storage_engine import StorageEngine
+        from src.engine.catalog_mgr import CatalogManager
+    except ImportError:
+        print("❌ 无法导入依赖，跳过测试")
+        return
+
+    storage = StorageEngine("test_error_data", buffer_capacity=4)
+    catalog = CatalogManager(storage)
+    executor = Executor(storage, catalog)
+
+    # 错误用例
+    error_cases = [
+        # 缺少子算子
+        ({"op": "GroupAggregate", "group_keys": [], "aggregates": [{"func": "COUNT", "column": "*", "alias": "cnt"}]},
+         "缺少子算子"),
+
+        # 无效聚合函数
+        ({"op": "GroupAggregate", "group_keys": [], "aggregates": [{"func": "INVALID", "column": "*", "alias": "cnt"}],
+          "child": {"op": "SeqScan", "table": "nonexistent"}}, "无效聚合函数"),
+
+        # 无效排序参数
+        ({"op": "Sort", "keys": [], "child": {"op": "SeqScan", "table": "nonexistent"}}, "无效排序参数"),
+
+        # 无效分页参数
+        ({"op": "Limit", "offset": -1, "count": 10, "child": {"op": "SeqScan", "table": "nonexistent"}}, "负数offset"),
+    ]
+
+    for i, (plan, desc) in enumerate(error_cases, 1):
+        print(f"\n[错误测试 {i}] {desc}")
+        try:
+            results = list(executor.execute(plan))
+            print("❌ 应该报错但执行成功了")
+        except ExecutionError as e:
+            print(f"✓ 正确捕获执行错误: {e}")
+        except Exception as e:
+            print(f"✓ 捕获其他错误: {e}")
+
+    storage.close()
+
 if __name__ == "__main__":
-    test_s5_executor_features()
+    test_s6s7_executor_integration()
+    test_executor_error_handling()

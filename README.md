@@ -201,6 +201,12 @@
 ```
 MoonSQL
 ├─ data
+├─ minidb_data
+│  ├─ sys_columns.tbl
+│  ├─ sys_foreign_keys.tbl
+│  ├─ sys_indexes.tbl
+│  ├─ sys_tables.tbl
+│  └─ tables_metadata.json
 ├─ README.md
 ├─ src
 │  ├─ cli
@@ -213,6 +219,7 @@ MoonSQL
 │  │  ├─ catalog_mgr.py
 │  │  ├─ constraints.py
 │  │  ├─ constraint_validator.py
+│  │  ├─ distinct.py
 │  │  ├─ executor.py
 │  │  ├─ interfaces.py
 │  │  ├─ test_catalog_data
@@ -231,6 +238,13 @@ MoonSQL
 │  │  ├─ test_executor_data
 │  │  │  ├─ tables_metadata.json
 │  │  │  └─ test_exec.tbl
+│  │  ├─ test_s5_data
+│  │  │  ├─ sys_columns.tbl
+│  │  │  ├─ sys_foreign_keys.tbl
+│  │  │  ├─ sys_indexes.tbl
+│  │  │  ├─ sys_tables.tbl
+│  │  │  ├─ tables_metadata.json
+│  │  │  └─ test_s5.tbl
 │  │  └─ __init__.py
 │  ├─ main.py
 │  ├─ minidb_data
@@ -241,9 +255,12 @@ MoonSQL
 │  │  ├─ sys_indexes.tbl
 │  │  ├─ sys_tables.tbl
 │  │  ├─ tables_metadata.json
+│  │  ├─ test.tbl
 │  │  ├─ test_debug.tbl
-│  │  └─ test_fix.tbl
+│  │  ├─ test_fix.tbl
+│  │  └─ users.tbl
 │  ├─ sql
+│  │  ├─ expressions.py
 │  │  ├─ lexer.py
 │  │  ├─ parser.py
 │  │  ├─ planner.py

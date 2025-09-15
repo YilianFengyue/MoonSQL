@@ -23,10 +23,10 @@
         "max_length": null
       }
     ],
-    "total_rows": 1,
-    "total_pages": 1,
-    "created_time": 1757915522.0140495,
-    "last_modified": 1757916114.4179757
+    "total_rows": 0,
+    "total_pages": 0,
+    "created_time": 1757913743.4757242,
+    "last_modified": 1757913743.4757242
   },
   "sys_columns": {
     "name": "sys_columns",
@@ -67,10 +67,10 @@
         "max_length": 100
       }
     ],
-    "total_rows": 5,
-    "total_pages": 1,
-    "created_time": 1757915522.0170565,
-    "last_modified": 1757915530.6929233
+    "total_rows": 0,
+    "total_pages": 0,
+    "created_time": 1757913743.477718,
+    "last_modified": 1757913743.477718
   },
   "sys_indexes": {
     "name": "sys_indexes",
@@ -103,8 +103,8 @@
     ],
     "total_rows": 0,
     "total_pages": 0,
-    "created_time": 1757915522.0180383,
-    "last_modified": 1757915522.0180383
+    "created_time": 1757913743.4787152,
+    "last_modified": 1757913743.4787152
   },
   "sys_foreign_keys": {
     "name": "sys_foreign_keys",
@@ -142,41 +142,7 @@
     ],
     "total_rows": 0,
     "total_pages": 0,
-    "created_time": 1757915522.0311208,
-    "last_modified": 1757915522.0311208
-  },
-  "employees": {
-    "name": "employees",
-    "columns": [
-      {
-        "name": "id",
-        "type": "INT",
-        "max_length": null
-      },
-      {
-        "name": "name",
-        "type": "VARCHAR",
-        "max_length": 50
-      },
-      {
-        "name": "dept",
-        "type": "VARCHAR",
-        "max_length": 20
-      },
-      {
-        "name": "salary",
-        "type": "INT",
-        "max_length": null
-      },
-      {
-        "name": "age",
-        "type": "INT",
-        "max_length": null
-      }
-    ],
-    "total_rows": 9,
-    "total_pages": 1,
-    "created_time": 1757915530.6869626,
-    "last_modified": 1757916114.41
+    "created_time": 1757913743.4827797,
+    "last_modified": 1757913743.4827797
   }
 }

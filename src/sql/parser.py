@@ -98,13 +98,13 @@ class WhereClauseNode(ASTNode):
         super().__init__(line, col)
         self.condition = condition
 
-class SelectNode(ASTNode):
-    """SELECT语句节点"""
-    def __init__(self, columns: List[Union[ColumnNode, str]], table_name: str, where_clause: Optional[WhereClauseNode] = None, line: int = 0, col: int = 0):
-        super().__init__(line, col)
-        self.columns = columns
-        self.table_name = table_name
-        self.where_clause = where_clause
+# class SelectNode(ASTNode):
+#     """SELECT语句节点"""
+#     def __init__(self, columns: List[Union[ColumnNode, str]], table_name: str, where_clause: Optional[WhereClauseNode] = None, line: int = 0, col: int = 0):
+#         super().__init__(line, col)
+#         self.columns = columns
+#         self.table_name = table_name
+#         self.where_clause = where_clause
 
 class DeleteNode(ASTNode):
     """DELETE语句节点"""
@@ -205,16 +205,76 @@ class NotNode(ASTNode):
         super().__init__(line, col)
         self.expr = expr
 
-# ★ 修改：扩展SelectNode支持DISTINCT
+
+# ★ 新增：聚合和排序相关AST节点（添加到现有AST节点定义后）
+
+class AggregateFuncNode(ASTNode):
+    """聚合函数节点：COUNT(*), SUM(col), AVG(col), MIN(col), MAX(col)"""
+
+    def __init__(self, func_name: str, column: str, alias: str = None, line: int = 0, col: int = 0):
+        super().__init__(line, col)
+        self.func_name = func_name.upper()  # COUNT, SUM, AVG, MIN, MAX
+        self.column = column  # "*" for COUNT(*), 实际列名 for others
+        self.alias = alias  # AS别名
+
+
+class GroupByNode(ASTNode):
+    """GROUP BY子句节点"""
+
+    def __init__(self, columns: List[str], line: int = 0, col: int = 0):
+        super().__init__(line, col)
+        self.columns = columns  # 分组列名列表
+
+
+class HavingNode(ASTNode):
+    """HAVING子句节点"""
+
+    def __init__(self, condition: ASTNode, line: int = 0, col: int = 0):
+        super().__init__(line, col)
+        self.condition = condition  # HAVING条件表达式
+
+
+class OrderByNode(ASTNode):
+    """ORDER BY子句节点"""
+
+    def __init__(self, sort_keys: List[Dict[str, str]], line: int = 0, col: int = 0):
+        super().__init__(line, col)
+        self.sort_keys = sort_keys  # [{"column": "name", "order": "ASC"}, ...]
+
+
+class LimitNode(ASTNode):
+    """LIMIT子句节点"""
+
+    def __init__(self, count: int, offset: int = 0, line: int = 0, col: int = 0):
+        super().__init__(line, col)
+        self.count = count  # 返回行数
+        self.offset = offset  # 跳过行数
+
+
+
+# ★ 完整替换：SelectNode支持完整SQL管线
 class SelectNode(ASTNode):
-    """SELECT语句节点（支持DISTINCT和别名）"""
-    def __init__(self, columns: List[Union[ColumnNode, AliasColumnNode, str]], table_name: str,
-                 distinct: bool = False, where_clause: Optional[WhereClauseNode] = None, line: int = 0, col: int = 0):
+    """SELECT语句节点（支持完整管线：DISTINCT, GROUP BY, HAVING, ORDER BY, LIMIT）"""
+    def __init__(self, columns: List[Union[ColumnNode, AliasColumnNode, AggregateFuncNode, str]],
+                 table_name: str,
+                 distinct: bool = False,
+                 where_clause: Optional[WhereClauseNode] = None,
+                 group_by: Optional[GroupByNode] = None,
+                 having: Optional[HavingNode] = None,
+                 order_by: Optional[OrderByNode] = None,
+                 limit: Optional[LimitNode] = None,
+                 line: int = 0, col: int = 0):
         super().__init__(line, col)
         self.columns = columns
         self.table_name = table_name
-        self.distinct = distinct  # ★ 新增：是否DISTINCT
+        self.distinct = distinct
         self.where_clause = where_clause
+        self.group_by = group_by      # ★ 新增
+        self.having = having          # ★ 新增
+        self.order_by = order_by      # ★ 新增
+        self.limit = limit            # ★ 新增
+
+
 
 # ==================== 语法分析器 ====================
 
@@ -536,30 +596,27 @@ class Parser:
         return InsertNode(table_name, columns, values, table_token.line, table_token.col)
 
     def _parse_select(self) -> SelectNode:
-        """解析SELECT语句（★ 替换完整方法）"""
+        """★ 完整替换：解析完整SELECT语句管线"""
         select_token = self._previous()  # SELECT已经匹配
 
-        # ★ 新增：检查DISTINCT
+        # DISTINCT
         distinct = False
         if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "DISTINCT":
-            self._advance()  # 消费DISTINCT
+            self._advance()
             distinct = True
 
-        # ★ 修改：列列表解析，支持别名
+        # ★ 列列表解析（支持聚合函数）
         columns = []
-
         if self._check(TokenType.OPERATOR) and self._peek().lexeme == "*":
-            self._advance()  # 消费*
+            self._advance()
             columns.append("*")
         else:
-            # ★ 修改：解析第一列（支持别名）
-            columns.append(self._parse_select_column())
+            columns.append(self._parse_select_column_or_aggregate())
 
-            # 处理更多列名
             while True:
                 if self._check(TokenType.DELIMITER) and self._peek().lexeme == ",":
                     self._advance()  # 消费逗号
-                    columns.append(self._parse_select_column())
+                    columns.append(self._parse_select_column_or_aggregate())
                 else:
                     break
 
@@ -570,23 +627,236 @@ class Parser:
         table_token = self._consume(TokenType.IDENTIFIER, None, "Expected table name")
         table_name = table_token.lexeme
 
-        # ★ 修改：可选的WHERE子句（支持复杂表达式）
+        # ★ 可选的WHERE子句
         where_clause = None
         if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "WHERE":
-            self._advance()  # 消费WHERE
-            condition = self._parse_or_expression()  # ★ 改为复杂表达式解析
+            self._advance()
+            condition = self._parse_or_expression()
             where_clause = WhereClauseNode(condition)
 
-        # 语句结束：顶层要求 ';'，子查询允许紧跟 ')'
+        # ★ 新增：可选的GROUP BY子句
+        group_by = None
+        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "GROUP":
+            group_by = self._parse_group_by()
+
+        # ★ 新增：可选的HAVING子句（必须在GROUP BY之后）
+        having = None
+        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "HAVING":
+            if group_by is None:
+                raise ParseError(self._peek().line, self._peek().col,
+                                 "HAVING clause requires GROUP BY clause")
+            having = self._parse_having()
+
+        # ★ 新增：可选的ORDER BY子句
+        order_by = None
+        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "ORDER":
+            order_by = self._parse_order_by()
+
+        # ★ 新增：可选的LIMIT子句
+        limit = None
+        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "LIMIT":
+            limit = self._parse_limit()
+
+        # 语句结束
         if self._check(TokenType.DELIMITER) and self._peek().lexeme == ";":
-            self._advance()  # 顶层 SELECT 以 ';' 结束
+            self._advance()
         elif self._check(TokenType.DELIMITER) and self._peek().lexeme == ")":
-            # 子查询：不吃掉 ')', 由调用者(_parse_in_expression)去匹配
-            pass
+            pass  # 子查询：不消费')'
         else:
             self._consume(TokenType.DELIMITER, ";", "Expected ';' at end of statement")
 
-        return SelectNode(columns, table_name, distinct, where_clause, select_token.line, select_token.col)
+        return SelectNode(columns, table_name, distinct, where_clause,
+                          group_by, having, order_by, limit,
+                          select_token.line, select_token.col)
+
+    def _parse_select_column_or_aggregate(self) -> Union[ColumnNode, AliasColumnNode, AggregateFuncNode]:
+        """★ 新增：解析SELECT列或聚合函数"""
+
+        # 检查是否是聚合函数
+        if self._check(TokenType.IDENTIFIER):
+            potential_func = self._peek().lexeme.upper()
+
+            # 聚合函数列表
+            if potential_func in ["COUNT", "SUM", "AVG", "MIN", "MAX"]:
+                return self._parse_aggregate_function()
+
+        # 普通列名（复用S5的逻辑）
+        return self._parse_select_column()
+
+    def _parse_aggregate_function(self) -> AggregateFuncNode:
+        """★ 新增：解析聚合函数"""
+        func_token = self._consume(TokenType.IDENTIFIER, None, "Expected aggregate function name")
+        func_name = func_token.lexeme.upper()
+
+        # 验证聚合函数名
+        if func_name not in ["COUNT", "SUM", "AVG", "MIN", "MAX"]:
+            raise ParseError(func_token.line, func_token.col,
+                             f"Unknown aggregate function: {func_name}")
+
+        # 左括号
+        self._consume(TokenType.DELIMITER, "(", f"Expected '(' after {func_name}")
+
+        # ★ 解析参数：COUNT(*)特殊处理
+        if func_name == "COUNT" and self._check(TokenType.OPERATOR) and self._peek().lexeme == "*":
+            self._advance()  # 消费*
+            column = "*"
+        else:
+            # 普通列名
+            col_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name")
+            column = col_token.lexeme
+
+        # 右括号
+        self._consume(TokenType.DELIMITER, ")", f"Expected ')' after {func_name} argument")
+
+        # ★ 检查别名
+        alias = None
+        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "AS":
+            self._advance()  # 消费AS
+            alias_token = self._consume(TokenType.IDENTIFIER, None, "Expected alias name")
+            alias = alias_token.lexeme
+        elif self._check(TokenType.IDENTIFIER):
+            # 隐式别名
+            alias_token = self._advance()
+            alias = alias_token.lexeme
+
+        return AggregateFuncNode(func_name, column, alias, func_token.line, func_token.col)
+
+    def _parse_group_by(self) -> GroupByNode:
+        """★ 新增：解析GROUP BY子句"""
+        group_token = self._advance()  # 消费GROUP
+        self._consume(TokenType.KEYWORD, "BY", "Expected 'BY' after 'GROUP'")
+
+        # 分组列列表
+        columns = []
+
+        # 第一个列名
+        col_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name")
+        columns.append(col_token.lexeme)
+
+        # 更多列名
+        while True:
+            if self._check(TokenType.DELIMITER) and self._peek().lexeme == ",":
+                self._advance()  # 消费逗号
+                col_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name")
+                columns.append(col_token.lexeme)
+            else:
+                break
+
+        return GroupByNode(columns, group_token.line, group_token.col)
+
+    def _parse_having(self) -> HavingNode:
+        """★ 新增：解析HAVING子句"""
+        having_token = self._advance()  # 消费HAVING
+
+        # HAVING条件（复用WHERE的表达式解析）
+        condition = self._parse_or_expression()
+
+        return HavingNode(condition, having_token.line, having_token.col)
+
+    def _parse_order_by(self) -> OrderByNode:
+        """★ 新增：解析ORDER BY子句"""
+        order_token = self._advance()  # 消费ORDER
+        self._consume(TokenType.KEYWORD, "BY", "Expected 'BY' after 'ORDER'")
+
+        # 排序键列表
+        sort_keys = []
+
+        # 第一个排序键
+        sort_keys.append(self._parse_sort_key())
+
+        # 更多排序键
+        while True:
+            if self._check(TokenType.DELIMITER) and self._peek().lexeme == ",":
+                self._advance()  # 消费逗号
+                sort_keys.append(self._parse_sort_key())
+            else:
+                break
+
+        return OrderByNode(sort_keys, order_token.line, order_token.col)
+
+    def _parse_sort_key(self) -> Dict[str, str]:
+        """★ 新增：解析单个排序键"""
+        # ★ 支持列名或列序号（1,2,3...）
+        if self._check(TokenType.NUMBER):
+            # 列序号形式：ORDER BY 1, 2 DESC
+            num_token = self._advance()
+            column = f"__pos_{num_token.lexeme}"  # 特殊标记，Planner处理
+        else:
+            # 列名形式：ORDER BY name, age DESC
+            col_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name or position")
+            column = col_token.lexeme
+
+        # ★ 可选的ASC/DESC
+        order = "ASC"  # 默认升序
+        if self._check(TokenType.KEYWORD):
+            next_kw = self._peek().lexeme.upper()
+            if next_kw in ["ASC", "DESC"]:
+                self._advance()
+                order = next_kw
+
+        return {"column": column, "order": order}
+
+    def _parse_limit(self) -> LimitNode:
+        """★ 新增：解析LIMIT子句"""
+        limit_token = self._advance()  # 消费LIMIT
+
+        # ★ 支持两种格式：
+        # 格式1: LIMIT count
+        # 格式2: LIMIT offset, count
+        # 格式3: LIMIT count OFFSET offset
+
+        first_number = self._consume(TokenType.NUMBER, None, "Expected number after LIMIT")
+        first_value = int(first_number.lexeme)
+
+        offset = 0
+        count = first_value
+
+        # 检查后续格式
+        if self._check(TokenType.DELIMITER) and self._peek().lexeme == ",":
+            # 格式2: LIMIT offset, count
+            self._advance()  # 消费逗号
+            second_number = self._consume(TokenType.NUMBER, None, "Expected count after comma")
+            offset = first_value
+            count = int(second_number.lexeme)
+
+        elif self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "OFFSET":
+            # 格式3: LIMIT count OFFSET offset
+            self._advance()  # 消费OFFSET
+            offset_number = self._consume(TokenType.NUMBER, None, "Expected number after OFFSET")
+            offset = int(offset_number.lexeme)
+            # count保持first_value
+
+        # 参数验证
+        if count <= 0:
+            raise ParseError(limit_token.line, limit_token.col,
+                             f"LIMIT count must be positive: {count}")
+        if offset < 0:
+            raise ParseError(limit_token.line, limit_token.col,
+                             f"LIMIT offset must be non-negative: {offset}")
+
+        return LimitNode(count, offset, limit_token.line, limit_token.col)
+
+    # ★ 新增：表达式环境的聚合函数调用解析（无别名）
+    def _parse_agg_call_in_expr(self) -> AggregateFuncNode:
+        """解析表达式中的聚合函数调用（HAVING/WHERE/ORDER BY中使用）"""
+        func_tok = self._consume(TokenType.IDENTIFIER, None, "Expected function name")
+        func = func_tok.lexeme.upper()
+        if func not in ["COUNT", "SUM", "AVG", "MIN", "MAX"]:
+            # 也可以选择：return ColumnNode(func) 但更安全是直接报"不支持的函数"
+            raise ParseError(func_tok.line, func_tok.col, f"Unsupported function in expression: {func}")
+
+        self._consume(TokenType.DELIMITER, "(", f"Expected '(' after {func}")
+
+        if func == "COUNT" and self._check(TokenType.OPERATOR) and self._peek().lexeme == "*":
+            self._advance()
+            col = "*"
+        else:
+            col_tok = self._consume(TokenType.IDENTIFIER, None, "Expected column name")
+            col = col_tok.lexeme
+
+        self._consume(TokenType.DELIMITER, ")", f"Expected ')' to close {func}(")
+        return AggregateFuncNode(func, col, alias=None, line=func_tok.line, col=func_tok.col)
+
 
     def _parse_select_column(self) -> Union[ColumnNode, AliasColumnNode]:
         """★ 新增：解析SELECT列（支持别名）"""
@@ -826,14 +1096,15 @@ class Parser:
         return self._parse_or_expression()
 
     def _parse_primary(self) -> ASTNode:
-        """解析基本表达式（补充：支持( ... )）"""
+        """解析基本表达式（★ 支持聚合函数调用识别）"""
         # 括号表达式
         if self._check(TokenType.DELIMITER) and self._peek().lexeme == "(":
-            lpar = self._advance()  # '('
-            expr = self._parse_or_expression()  # 按当前优先级体系解析内部
+            lpar = self._advance()
+            expr = self._parse_or_expression()
             self._consume(TokenType.DELIMITER, ")", "Expected ')' after parenthesized expression")
             return expr
 
+        # 数字常量
         if self._check(TokenType.NUMBER):
             token = self._advance()
             try:
@@ -842,16 +1113,38 @@ class Parser:
                 value = float(token.lexeme)
             return ValueNode(value, "NUMBER", token.line, token.col)
 
+        # 字符串常量
         if self._check(TokenType.STRING):
             token = self._advance()
             return ValueNode(token.lexeme, "STRING", token.line, token.col)
 
+        # NULL常量
+        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "NULL":
+            token = self._advance()
+            return ValueNode(None, "NULL", token.line, token.col)
+
+        # ★ 修复：IDENTIFIER 后面如果紧跟 "(" 则按函数调用解析（限五个聚合）
         if self._check(TokenType.IDENTIFIER):
+            # 先看下一个 token，不前进指针
+            cur = self._peek()  # IDENTIFIER
+            # 防越界：检查是否有下一个token
+            nxt = self.tokens[self.current + 1] if (self.current + 1) < len(self.tokens) else None
+
+            if nxt is not None and nxt.type == TokenType.DELIMITER and nxt.lexeme == "(":
+                # 识别为函数调用：检查是否为聚合函数
+                func_name = cur.lexeme.upper()
+                if func_name in ["COUNT", "SUM", "AVG", "MIN", "MAX"]:
+                    return self._parse_agg_call_in_expr()
+                else:
+                    # 非聚合函数：报错（暂不支持其他函数）
+                    raise ParseError(cur.line, cur.col, f"Unsupported function: {func_name}")
+
+            # 普通列名
             token = self._advance()
             return ColumnNode(token.lexeme, token.line, token.col)
 
         current = self._peek()
-        raise ParseError(current.line, current.col, "Expected expression", "number, string, or identifier")
+        raise ParseError(current.line, current.col, "Expected expression", "number, string, identifier or '(' ... ')'")
 
     def _parse_value(self) -> ValueNode:
         """解析值"""
@@ -873,6 +1166,7 @@ class Parser:
 
         current = self._peek()
         raise ParseError(current.line, current.col, "Expected value", "number, string, or NULL")
+
 
     # ==================== 辅助方法 ====================
 
@@ -1029,5 +1323,144 @@ def test_s5_parser_extensions():
             print(f"❌ 语法错误: {e.hint}")
         except Exception as e:
             print(f"❌ 其他错误: {e}")
+
+
+def test_s6s7_parser_extensions():
+    """测试S6+S7语法扩展"""
+    print("=== S6+S7 Parser扩展测试 ===")
+
+    parser = Parser()
+
+    test_cases = [
+        # S6聚合函数测试
+        ("SELECT COUNT(*) FROM users;", "COUNT(*)聚合"),
+        ("SELECT COUNT(id) FROM users;", "COUNT(column)聚合"),
+        ("SELECT AVG(salary), SUM(salary) FROM employees;", "多个聚合函数"),
+        ("SELECT dept, COUNT(*) as cnt FROM emp GROUP BY dept;", "分组聚合"),
+        ("SELECT dept, AVG(sal) FROM emp GROUP BY dept HAVING AVG(sal) > 5000;", "HAVING过滤"),
+
+        # S7排序和分页测试
+        ("SELECT * FROM users ORDER BY name;", "单列排序"),
+        ("SELECT * FROM users ORDER BY salary DESC, name ASC;", "多列排序"),
+        ("SELECT * FROM users ORDER BY 1, 2 DESC;", "序号排序"),
+        ("SELECT * FROM users LIMIT 10;", "简单分页"),
+        ("SELECT * FROM users LIMIT 5, 10;", "偏移分页"),
+        ("SELECT * FROM users LIMIT 10 OFFSET 5;", "OFFSET语法"),
+
+        # 完整管线测试
+        ("SELECT dept, AVG(salary) as avg_sal FROM employees WHERE age > 25 GROUP BY dept HAVING AVG(salary) > 60000 ORDER BY avg_sal DESC LIMIT 3;",
+         "完整管线"),
+
+        # 别名测试
+        ("SELECT COUNT(*) as total, AVG(age) as avg_age FROM users;", "聚合函数别名"),
+        ("SELECT name username, salary FROM emp ORDER BY username;", "ORDER BY别名"),
+    ]
+
+    for i, (sql, desc) in enumerate(test_cases, 1):
+        print(f"\n[测试 {i}] {desc}")
+        print(f"SQL: {sql}")
+        try:
+            ast = parser.parse(sql)
+            print("✓ 解析成功")
+
+            # 显示关键特性
+            if isinstance(ast, SelectNode):
+                # 聚合函数检查
+                agg_funcs = [col for col in ast.columns if isinstance(col, AggregateFuncNode)]
+                if agg_funcs:
+                    for agg in agg_funcs:
+                        print(f"   聚合函数: {agg.func_name}({agg.column})" +
+                              (f" AS {agg.alias}" if agg.alias else ""))
+
+                # GROUP BY检查
+                if ast.group_by:
+                    print(f"   分组列: {', '.join(ast.group_by.columns)}")
+
+                # HAVING检查
+                if ast.having:
+                    print(f"   HAVING条件: {type(ast.having.condition).__name__}")
+
+                # ORDER BY检查
+                if ast.order_by:
+                    keys_desc = []
+                    for key in ast.order_by.sort_keys:
+                        keys_desc.append(f"{key['column']} {key['order']}")
+                    print(f"   排序键: {', '.join(keys_desc)}")
+
+                # LIMIT检查
+                if ast.limit:
+                    if ast.limit.offset > 0:
+                        print(f"   分页: LIMIT {ast.limit.offset}, {ast.limit.count}")
+                    else:
+                        print(f"   分页: LIMIT {ast.limit.count}")
+
+        except ParseError as e:
+            print(f"❌ 语法错误: {e.hint}")
+        except Exception as e:
+            print(f"❌ 其他错误: {e}")
+
+
+def test_parser_error_cases():
+    """测试语法错误检测"""
+    print("\n=== 语法错误检测测试 ===")
+
+    parser = Parser()
+
+    error_cases = [
+        ("SELECT COUNT() FROM users;", "聚合函数缺少参数"),
+        ("SELECT * FROM users HAVING id > 1;", "HAVING without GROUP BY"),
+        ("SELECT UNKNOWN(id) FROM users;", "未知聚合函数"),
+        ("SELECT * FROM users LIMIT -1;", "负数LIMIT"),
+        ("SELECT * FROM users LIMIT 0;", "零LIMIT"),
+        ("SELECT * FROM users ORDER BY;", "ORDER BY缺少列名"),
+        ("SELECT COUNT(*) GROUP BY dept;", "缺少FROM子句"),
+    ]
+
+    for i, (sql, expected_error) in enumerate(error_cases, 1):
+        print(f"\n[错误测试 {i}] {expected_error}")
+        print(f"SQL: {sql}")
+        try:
+            ast = parser.parse(sql)
+            print(f"❌ 应该报错但解析成功了")
+        except ParseError as e:
+            print(f"✓ 正确捕获错误: {e.hint}")
+        except Exception as e:
+            print(f"✓ 捕获其他错误: {e}")
+
+
+def test_having_bug_fix():
+    """测试HAVING聚合函数bug修复"""
+    print("=== HAVING聚合函数Bug修复测试 ===")
+
+    parser = Parser()
+
+    # 修复前会失败的用例
+    test_cases = [
+        ("SELECT dept, AVG(salary) FROM emp GROUP BY dept HAVING AVG(salary) > 5000;", "HAVING AVG"),
+        ("SELECT age, COUNT(*) FROM emp GROUP BY age HAVING COUNT(*) >= 2;", "HAVING COUNT"),
+        ("SELECT dept, SUM(sal) FROM emp GROUP BY dept HAVING SUM(sal) > 100000;", "HAVING SUM"),
+        ("SELECT * FROM emp WHERE dept = 'IT' AND id IN (SELECT MAX(id) FROM emp);", "子查询中的聚合"),
+    ]
+
+    for i, (sql, desc) in enumerate(test_cases, 1):
+        print(f"\n[修复测试 {i}] {desc}")
+        print(f"SQL: {sql}")
+        try:
+            ast = parser.parse(sql)
+            print("✓ 解析成功 - HAVING聚合函数已可正确解析")
+
+            # 检查HAVING子句
+            if isinstance(ast, SelectNode) and ast.having:
+                condition_type = type(ast.having.condition).__name__
+                print(f"   HAVING条件类型: {condition_type}")
+
+        except ParseError as e:
+            print(f"❌ 仍有语法错误: {e.hint}")
+        except Exception as e:
+            print(f"❌ 其他错误: {e}")
+
+
 if __name__ == "__main__":
-    test_s5_parser_extensions()
+    # test_s6s7_parser_extensions()
+    # test_parser_error_cases()
+    test_having_bug_fix()
