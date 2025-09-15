@@ -23,10 +23,10 @@
         "max_length": null
       }
     ],
-    "total_rows": 6,
+    "total_rows": 1,
     "total_pages": 1,
-    "created_time": 1757728445.0017176,
-    "last_modified": 1757904874.9365385
+    "created_time": 1757903000.7473896,
+    "last_modified": 1757903330.594308
   },
   "sys_columns": {
     "name": "sys_columns",
@@ -67,10 +67,10 @@
         "max_length": 100
       }
     ],
-    "total_rows": 16,
+    "total_rows": 4,
     "total_pages": 1,
-    "created_time": 1757728445.0039241,
-    "last_modified": 1757904631.6722164
+    "created_time": 1757903000.7499115,
+    "last_modified": 1757903330.5554972
   },
   "sys_indexes": {
     "name": "sys_indexes",
@@ -103,8 +103,8 @@
     ],
     "total_rows": 0,
     "total_pages": 0,
-    "created_time": 1757728445.0054007,
-    "last_modified": 1757728445.0054007
+    "created_time": 1757903000.750896,
+    "last_modified": 1757903000.750896
   },
   "sys_foreign_keys": {
     "name": "sys_foreign_keys",
@@ -140,94 +140,13 @@
         "max_length": 128
       }
     ],
-    "total_rows": 1,
-    "total_pages": 1,
-    "created_time": 1757728445.0092382,
-    "last_modified": 1757728796.5489902
-  },
-  "departments": {
-    "name": "departments",
-    "columns": [
-      {
-        "name": "id",
-        "type": "INT",
-        "max_length": null
-      },
-      {
-        "name": "name",
-        "type": "VARCHAR",
-        "max_length": 50
-      }
-    ],
-    "total_rows": 1,
-    "total_pages": 1,
-    "created_time": 1757728466.4879413,
-    "last_modified": 1757728512.1253
-  },
-  "employees": {
-    "name": "employees",
-    "columns": [
-      {
-        "name": "id",
-        "type": "INT",
-        "max_length": null
-      },
-      {
-        "name": "name",
-        "type": "VARCHAR",
-        "max_length": 50
-      },
-      {
-        "name": "dept_id",
-        "type": "INT",
-        "max_length": null
-      }
-    ],
-    "total_rows": 3,
-    "total_pages": 1,
-    "created_time": 1757728488.022523,
-    "last_modified": 1757728503.4477112
-  },
-  "test_debug": {
-    "name": "test_debug",
-    "columns": [
-      {
-        "name": "id",
-        "type": "INT",
-        "max_length": null
-      },
-      {
-        "name": "parent_id",
-        "type": "INT",
-        "max_length": null
-      }
-    ],
     "total_rows": 0,
     "total_pages": 0,
-    "created_time": 1757728640.4698007,
-    "last_modified": 1757728640.4698007
+    "created_time": 1757903000.7798164,
+    "last_modified": 1757903000.7798164
   },
-  "test_fix": {
-    "name": "test_fix",
-    "columns": [
-      {
-        "name": "id",
-        "type": "INT",
-        "max_length": null
-      },
-      {
-        "name": "parent_id",
-        "type": "INT",
-        "max_length": null
-      }
-    ],
-    "total_rows": 1,
-    "total_pages": 1,
-    "created_time": 1757728796.5458694,
-    "last_modified": 1757728978.7075868
-  },
-  "users": {
-    "name": "users",
+  "test_s5": {
+    "name": "test_s5",
     "columns": [
       {
         "name": "id",
@@ -247,36 +166,12 @@
       {
         "name": "status",
         "type": "VARCHAR",
-        "max_length": 20
-      },
-      {
-        "name": "email",
-        "type": "VARCHAR",
-        "max_length": 100
-      }
-    ],
-    "total_rows": 6,
-    "total_pages": 1,
-    "created_time": 1757903907.314337,
-    "last_modified": 1757903949.8248928
-  },
-  "test": {
-    "name": "test",
-    "columns": [
-      {
-        "name": "id",
-        "type": "INT",
-        "max_length": null
-      },
-      {
-        "name": "name",
-        "type": "VARCHAR",
         "max_length": 10
       }
     ],
-    "total_rows": 6,
+    "total_rows": 5,
     "total_pages": 1,
-    "created_time": 1757904631.6662366,
-    "last_modified": 1757904874.9335485
+    "created_time": 1757903330.5452971,
+    "last_modified": 1757903330.5933115
   }
 }

@@ -272,54 +272,239 @@ class Planner:
 
         return plan
 
-    def _plan_select(self, node: SelectNode) -> Dict[str, Any]:
-        """生成SELECT执行计划"""
+    def _plan_select(self, node) -> Dict[str, Any]:
+        """★ 完整替换：生成SELECT执行计划（支持DISTINCT和别名）"""
+        # 检查节点类型兼容性
+        if hasattr(node, 'table_name'):
+            table_name = node.table_name
+        else:
+            table_name = getattr(node, 'table_name', 'unknown')
+
         # 从底层开始构建计划树
 
         # 1. 基础扫描算子
         base_plan = {
             "op": "SeqScan",
-            "table": node.table_name,
+            "table": table_name,
             "estimated_cost": 10.0,
             "estimated_rows": 100,
-            "description": f"Sequential scan on table '{node.table_name}'"
+            "description": f"Sequential scan on table '{table_name}'"
         }
 
         current_plan = base_plan
 
         # 2. 添加Filter算子（如果有WHERE子句）
-        if node.where_clause:
+        if hasattr(node, 'where_clause') and node.where_clause:
             filter_plan = {
                 "op": "Filter",
-                "predicate": self._serialize_condition(node.where_clause.condition),
+                "condition": self._convert_condition_to_dict(node.where_clause.condition),  # ★ 修改：使用新转换器
                 "estimated_cost": current_plan["estimated_cost"] + 5.0,
                 "estimated_rows": max(1, current_plan["estimated_rows"] // 2),
-                "description": f"Filter rows with condition",
+                "description": "Filter rows with complex condition",
                 "child": current_plan
             }
             current_plan = filter_plan
 
-        # 3. 添加Project算子（列投影）
-        if not (len(node.columns) == 1 and node.columns[0] == "*"):
-            # 不是SELECT *，需要投影
-            columns = []
-            for col in node.columns:
-                if isinstance(col, ColumnNode):
-                    columns.append(col.name)
-                elif isinstance(col, str):
-                    columns.append(col)
+        # 3. 确定是否需要投影和去重
+        has_distinct = getattr(node, 'distinct', False)
+        needs_projection = not (len(node.columns) == 1 and node.columns[0] == "*")
 
+        # ★ 新增：根据情况选择算子组合策略
+        if has_distinct and needs_projection:
+            # 策略1：先投影再去重（适合大部分情况）
             project_plan = {
                 "op": "Project",
-                "columns": columns,
+                "columns": self._convert_columns_to_plan_format(node.columns),  # ★ 新方法
                 "estimated_cost": current_plan["estimated_cost"] + 1.0,
                 "estimated_rows": current_plan["estimated_rows"],
-                "description": f"Project {len(columns)} columns",
+                "description": f"Project columns with aliases",
+                "child": current_plan
+            }
+
+            distinct_plan = {
+                "op": "Distinct",
+                "estimated_cost": project_plan["estimated_cost"] + 3.0,
+                "estimated_rows": max(1, project_plan["estimated_rows"] // 3),
+                "description": "Remove duplicate rows",
+                "child": project_plan
+            }
+            current_plan = distinct_plan
+
+        elif has_distinct and not needs_projection:
+            # 策略2：直接去重（SELECT DISTINCT *）
+            distinct_plan = {
+                "op": "Distinct",
+                "estimated_cost": current_plan["estimated_cost"] + 3.0,
+                "estimated_rows": max(1, current_plan["estimated_rows"] // 3),
+                "description": "Remove duplicate rows from all columns",
+                "child": current_plan
+            }
+            current_plan = distinct_plan
+
+        elif not has_distinct and needs_projection:
+            # 策略3：仅投影
+            project_plan = {
+                "op": "Project",
+                "columns": self._convert_columns_to_plan_format(node.columns),
+                "estimated_cost": current_plan["estimated_cost"] + 1.0,
+                "estimated_rows": current_plan["estimated_rows"],
+                "description": f"Project specified columns",
                 "child": current_plan
             }
             current_plan = project_plan
 
+        # 策略4：无投影无去重（SELECT *），current_plan保持不变
+
         return current_plan
+
+    def _convert_columns_to_plan_format(self, columns: List) -> List[Dict[str, Any]]:
+        """★ 新增：将列定义转换为计划格式（支持别名）"""
+        plan_columns = []
+
+        for col in columns:
+            if col == "*":
+                plan_columns.append("*")
+            elif isinstance(col, str):
+                # 简单列名
+                plan_columns.append(col)
+            elif hasattr(col, '__class__'):
+                # AST节点
+                if col.__class__.__name__ == "ColumnNode":
+                    plan_columns.append(col.name)
+                elif col.__class__.__name__ == "AliasColumnNode":
+                    # ★ 别名列
+                    plan_columns.append({
+                        "name": col.column_name,
+                        "alias": col.alias
+                    })
+            else:
+                # 兜底处理
+                plan_columns.append(str(col))
+
+        return plan_columns
+
+    def _convert_condition_to_dict(self, condition_node) -> Dict[str, Any]:
+        """★ 完整替换：将复杂条件AST转换为执行器格式"""
+        if not condition_node:
+            return {}
+
+        # 获取节点类型名称
+        if hasattr(condition_node, '__class__'):
+            node_type = condition_node.__class__.__name__
+        else:
+            # 向后兼容：可能已经是字典格式
+            if isinstance(condition_node, dict):
+                return condition_node
+            else:
+                return {"type": "compare", "left": "unknown", "op": "=", "right": None}
+
+        # ★ 根据节点类型进行转换
+        if node_type == "BinaryOpNode":
+            return {
+                "type": "compare",
+                "left": self._extract_expression_value(condition_node.left),
+                "op": condition_node.operator,
+                "right": self._extract_expression_value(condition_node.right)
+            }
+
+        elif node_type == "LogicalOpNode":
+            return {
+                "type": condition_node.operator.lower(),  # "AND" -> "and"
+                "left": self._convert_condition_to_dict(condition_node.left),
+                "right": self._convert_condition_to_dict(condition_node.right)
+            }
+
+        elif node_type == "NotNode":
+            return {
+                "type": "not",
+                "condition": self._convert_condition_to_dict(condition_node.expr)
+            }
+
+        elif node_type == "LikeNode":
+            return {
+                "type": "like",
+                "left": self._extract_expression_value(condition_node.left),
+                "right": self._extract_expression_value(condition_node.pattern)
+            }
+
+        elif node_type == "InNode":
+            result = {
+                "type": "in",
+                "left": self._extract_expression_value(condition_node.left)
+            }
+
+            if hasattr(condition_node, 'subquery') and condition_node.subquery:
+                # 子查询
+                result["subquery"] = self._generate_plan(condition_node.subquery)
+            else:
+                # 常量列表
+                result["values"] = [self._extract_expression_value(v) for v in condition_node.values]
+
+            return result
+
+        elif node_type == "BetweenNode":
+            return {
+                "type": "between",
+                "left": self._extract_expression_value(condition_node.expr),
+                "min": self._extract_expression_value(condition_node.min_val),
+                "max": self._extract_expression_value(condition_node.max_val)
+            }
+
+        elif node_type == "IsNullNode":
+            return {
+                "type": "is_null",
+                "left": self._extract_expression_value(condition_node.expr),
+                "is_null": not condition_node.is_not  # is_not=True表示IS NOT NULL
+            }
+
+        else:
+            # 兜底：尝试向后兼容的转换
+            return self._serialize_condition_legacy(condition_node)
+
+    def _extract_expression_value(self, expr_node) -> Any:
+        """★ 新增：从表达式节点提取值"""
+        if not expr_node:
+            return None
+
+        if hasattr(expr_node, '__class__'):
+            node_type = expr_node.__class__.__name__
+
+            if node_type == "ColumnNode":
+                return expr_node.name
+            elif node_type == "ValueNode":
+                return expr_node.value
+            elif node_type == "AliasColumnNode":
+                return expr_node.column_name  # 使用原列名，不是别名
+
+        # 如果是基本类型，直接返回
+        if isinstance(expr_node, (str, int, float, bool)) or expr_node is None:
+            return expr_node
+
+        # 兜底
+        return str(expr_node)
+
+    def _serialize_condition_legacy(self, condition) -> Dict[str, Any]:
+        """★ 保留：向后兼容的条件序列化"""
+        # 这是原有的_serialize_condition方法，用于兜底
+        try:
+            if hasattr(condition, '__class__') and condition.__class__.__name__ == "BinaryOpNode":
+                left_str = self._serialize_expression(condition.left)
+                right_str = self._serialize_expression(condition.right)
+                return {
+                    "type": "compare",
+                    "left": left_str,
+                    "op": condition.operator,
+                    "right": right_str
+                }
+            else:
+                return {
+                    "type": "compare",
+                    "left": "unknown",
+                    "op": "=",
+                    "right": None
+                }
+        except:
+            return {"type": "compare", "left": "unknown", "op": "=", "right": None}
 
     def _plan_delete(self, node: DeleteNode) -> Dict[str, Any]:
         """生成DELETE执行计划"""
@@ -360,14 +545,30 @@ class Planner:
 
         return delete_plan
 
-    def _serialize_condition(self, condition: ASTNode) -> str:
-        """将条件表达式序列化为字符串"""
-        if isinstance(condition, BinaryOpNode):
-            left_str = self._serialize_expression(condition.left)
-            right_str = self._serialize_expression(condition.right)
-            return f"{left_str} {condition.operator} {right_str}"
-        else:
-            return self._serialize_expression(condition)
+    def _serialize_condition(self, condition) -> str:
+        """向后兼容：条件序列化为字符串（已弃用，保留接口）"""
+        # 将字典格式的条件转换为简单字符串表示
+        if isinstance(condition, dict):
+            cond_type = condition.get("type")
+            if cond_type == "compare":
+                left = condition.get("left", "")
+                op = condition.get("op", "=")
+                right = condition.get("right", "")
+                if isinstance(right, str):
+                    return f"{left} {op} '{right}'"
+                else:
+                    return f"{left} {op} {right}"
+
+        # 原有逻辑的兜底
+        try:
+            if hasattr(condition, '__class__') and condition.__class__.__name__ == "BinaryOpNode":
+                left_str = self._serialize_expression(condition.left)
+                right_str = self._serialize_expression(condition.right)
+                return f"{left_str} {condition.operator} {right_str}"
+            else:
+                return str(condition)
+        except:
+            return "true"
 
     def _serialize_expression(self, expr: ASTNode) -> str:
         """将表达式序列化为字符串"""
@@ -484,6 +685,129 @@ def test_planner():
             print(f"❌ 意外错误: {e}")
 
 
+def test_s5_planner_features():
+    """测试S5计划生成功能"""
+    print("=== S5 Planner功能测试 ===")
+
+    from sql.semantic import Catalog
+
+    # 创建测试catalog
+    catalog = Catalog()
+    catalog.create_table("users", [
+        {"name": "id", "type": "INT"},
+        {"name": "name", "type": "VARCHAR"},
+        {"name": "age", "type": "INT"},
+        {"name": "email", "type": "VARCHAR"}
+    ])
+
+    planner = Planner(catalog)
+
+    test_cases = [
+        # DISTINCT测试
+        ("SELECT DISTINCT name FROM users;", "DISTINCT单列"),
+        ("SELECT DISTINCT id, name FROM users;", "DISTINCT多列"),
+        ("SELECT DISTINCT * FROM users;", "DISTINCT全部列"),
+
+        # 别名测试
+        ("SELECT id AS user_id FROM users;", "AS别名"),
+        ("SELECT id user_id FROM users;", "隐式别名"),
+        ("SELECT id AS user_id, name AS username FROM users;", "多列别名"),
+
+        # 复杂WHERE测试
+        ("SELECT * FROM users WHERE age > 18 AND name LIKE 'A%';", "AND + LIKE"),
+        ("SELECT * FROM users WHERE age IN (18, 19, 20);", "IN常量"),
+        ("SELECT * FROM users WHERE age BETWEEN 18 AND 65;", "BETWEEN"),
+        ("SELECT * FROM users WHERE email IS NULL;", "IS NULL"),
+        ("SELECT * FROM users WHERE age > 25 OR name = 'Admin';", "OR逻辑"),
+        ("SELECT * FROM users WHERE NOT (age < 18);", "NOT逻辑"),
+
+        # 组合功能
+        ("SELECT DISTINCT name AS username FROM users WHERE age > 18;", "DISTINCT+别名+WHERE"),
+    ]
+
+    for i, (sql, desc) in enumerate(test_cases, 1):
+        print(f"\n[测试 {i}] {desc}")
+        print(f"SQL: {sql}")
+        try:
+            plan = planner.plan(sql)
+            print("✓ 计划生成成功")
+
+            plan_dict = plan.to_dict()
+
+            # 检查关键特性
+            if plan_dict.get("op") == "Distinct":
+                print("   特性: 包含DISTINCT算子")
+
+            if plan_dict.get("op") == "Project" or (
+                    plan_dict.get("child", {}).get("op") == "Project"
+            ):
+                project_node = plan_dict if plan_dict.get("op") == "Project" else plan_dict.get("child", {})
+                columns = project_node.get("columns", [])
+                for col in columns:
+                    if isinstance(col, dict) and "alias" in col:
+                        print(f"   特性: 别名 {col['name']} AS {col['alias']}")
+
+            # 检查过滤条件
+            def check_filter(node):
+                if isinstance(node, dict):
+                    if node.get("op") == "Filter":
+                        condition = node.get("condition", {})
+                        cond_type = condition.get("type", "unknown")
+                        print(f"   特性: 过滤条件类型 {cond_type}")
+
+                    child = node.get("child")
+                    if child:
+                        check_filter(child)
+
+            check_filter(plan_dict)
+
+        except Exception as e:
+            print(f"❌ 计划生成失败: {e}")
+
+
+def test_condition_conversion():
+    """测试条件转换功能"""
+    print("\n=== 条件转换测试 ===")
+
+    planner = Planner()
+
+    # 模拟AST节点
+    class MockBinaryOpNode:
+        def __init__(self, left, op, right):
+            self.left = left
+            self.operator = op
+            self.right = right
+            self.__class__.__name__ = "BinaryOpNode"
+
+    class MockColumnNode:
+        def __init__(self, name):
+            self.name = name
+            self.__class__.__name__ = "ColumnNode"
+
+    class MockValueNode:
+        def __init__(self, value):
+            self.value = value
+            self.__class__.__name__ = "ValueNode"
+
+    # 测试条件转换
+    condition_ast = MockBinaryOpNode(
+        MockColumnNode("age"),
+        ">",
+        MockValueNode(18)
+    )
+
+    condition_dict = planner._convert_condition_to_dict(condition_ast)
+    print(f"AST转换结果: {condition_dict}")
+
+    expected = {
+        "type": "compare",
+        "left": "age",
+        "op": ">",
+        "right": 18
+    }
+
+    print(f"转换正确性: {condition_dict == expected}")\
 
 if __name__ == "__main__":
-    test_planner()
+    test_s5_planner_features()
+    test_condition_conversion()

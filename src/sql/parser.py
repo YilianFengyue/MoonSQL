@@ -149,6 +149,73 @@ class AlterTableNode(ASTNode):
         self.action = action
         self.payload = payload
 
+# ★ 新增：别名列节点
+class AliasColumnNode(ASTNode):
+    """带别名的列节点"""
+    def __init__(self, column_name: str, alias: str, line: int = 0, col: int = 0):
+        super().__init__(line, col)
+        self.column_name = column_name
+        self.alias = alias
+
+# ★ 新增：复杂表达式节点
+class InNode(ASTNode):
+    """IN表达式节点"""
+    def __init__(self, left: ASTNode, values: List[Any], is_not: bool = False, subquery: ASTNode = None, line: int = 0, col: int = 0):
+        super().__init__(line, col)
+        self.left = left
+        self.values = values  # 常量列表
+        self.subquery = subquery  # 子查询
+        self.is_not = is_not  # NOT IN
+
+class BetweenNode(ASTNode):
+    """BETWEEN表达式节点"""
+    def __init__(self, expr: ASTNode, min_val: ASTNode, max_val: ASTNode, is_not: bool = False, line: int = 0, col: int = 0):
+        super().__init__(line, col)
+        self.expr = expr
+        self.min_val = min_val
+        self.max_val = max_val
+        self.is_not = is_not
+
+class LikeNode(ASTNode):
+    """LIKE表达式节点"""
+    def __init__(self, left: ASTNode, pattern: ASTNode, is_not: bool = False, line: int = 0, col: int = 0):
+        super().__init__(line, col)
+        self.left = left
+        self.pattern = pattern
+        self.is_not = is_not
+
+class IsNullNode(ASTNode):
+    """IS NULL表达式节点"""
+    def __init__(self, expr: ASTNode, is_not: bool = False, line: int = 0, col: int = 0):
+        super().__init__(line, col)
+        self.expr = expr
+        self.is_not = is_not
+
+class LogicalOpNode(ASTNode):
+    """逻辑操作符节点(AND/OR)"""
+    def __init__(self, left: ASTNode, operator: str, right: ASTNode, line: int = 0, col: int = 0):
+        super().__init__(line, col)
+        self.left = left
+        self.operator = operator  # "AND" or "OR"
+        self.right = right
+
+class NotNode(ASTNode):
+    """NOT操作符节点"""
+    def __init__(self, expr: ASTNode, line: int = 0, col: int = 0):
+        super().__init__(line, col)
+        self.expr = expr
+
+# ★ 修改：扩展SelectNode支持DISTINCT
+class SelectNode(ASTNode):
+    """SELECT语句节点（支持DISTINCT和别名）"""
+    def __init__(self, columns: List[Union[ColumnNode, AliasColumnNode, str]], table_name: str,
+                 distinct: bool = False, where_clause: Optional[WhereClauseNode] = None, line: int = 0, col: int = 0):
+        super().__init__(line, col)
+        self.columns = columns
+        self.table_name = table_name
+        self.distinct = distinct  # ★ 新增：是否DISTINCT
+        self.where_clause = where_clause
+
 # ==================== 语法分析器 ====================
 
 class ParseError(SqlError):
@@ -469,26 +536,30 @@ class Parser:
         return InsertNode(table_name, columns, values, table_token.line, table_token.col)
 
     def _parse_select(self) -> SelectNode:
-        """解析SELECT语句"""
+        """解析SELECT语句（★ 替换完整方法）"""
         select_token = self._previous()  # SELECT已经匹配
 
-        # 列列表
+        # ★ 新增：检查DISTINCT
+        distinct = False
+        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "DISTINCT":
+            self._advance()  # 消费DISTINCT
+            distinct = True
+
+        # ★ 修改：列列表解析，支持别名
         columns = []
 
         if self._check(TokenType.OPERATOR) and self._peek().lexeme == "*":
             self._advance()  # 消费*
             columns.append("*")
         else:
-            # 至少一个列名
-            col_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name or '*'")
-            columns.append(ColumnNode(col_token.lexeme, col_token.line, col_token.col))
+            # ★ 修改：解析第一列（支持别名）
+            columns.append(self._parse_select_column())
 
             # 处理更多列名
             while True:
                 if self._check(TokenType.DELIMITER) and self._peek().lexeme == ",":
                     self._advance()  # 消费逗号
-                    col_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name")
-                    columns.append(ColumnNode(col_token.lexeme, col_token.line, col_token.col))
+                    columns.append(self._parse_select_column())
                 else:
                     break
 
@@ -499,17 +570,159 @@ class Parser:
         table_token = self._consume(TokenType.IDENTIFIER, None, "Expected table name")
         table_name = table_token.lexeme
 
-        # 可选的WHERE子句
+        # ★ 修改：可选的WHERE子句（支持复杂表达式）
         where_clause = None
         if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "WHERE":
             self._advance()  # 消费WHERE
-            condition = self._parse_expression()
+            condition = self._parse_or_expression()  # ★ 改为复杂表达式解析
             where_clause = WhereClauseNode(condition)
 
-        # 分号
-        self._consume(TokenType.DELIMITER, ";", "Expected ';' at end of statement")
+        # 语句结束：顶层要求 ';'，子查询允许紧跟 ')'
+        if self._check(TokenType.DELIMITER) and self._peek().lexeme == ";":
+            self._advance()  # 顶层 SELECT 以 ';' 结束
+        elif self._check(TokenType.DELIMITER) and self._peek().lexeme == ")":
+            # 子查询：不吃掉 ')', 由调用者(_parse_in_expression)去匹配
+            pass
+        else:
+            self._consume(TokenType.DELIMITER, ";", "Expected ';' at end of statement")
 
-        return SelectNode(columns, table_name, where_clause, select_token.line, select_token.col)
+        return SelectNode(columns, table_name, distinct, where_clause, select_token.line, select_token.col)
+
+    def _parse_select_column(self) -> Union[ColumnNode, AliasColumnNode]:
+        """★ 新增：解析SELECT列（支持别名）"""
+        # 列名
+        col_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name")
+        column_name = col_token.lexeme
+
+        # 检查是否有AS别名
+        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "AS":
+            self._advance()  # 消费AS
+            alias_token = self._consume(TokenType.IDENTIFIER, None, "Expected alias name")
+            return AliasColumnNode(column_name, alias_token.lexeme, col_token.line, col_token.col)
+
+        # 检查隐式别名（无AS关键字）
+        elif self._check(TokenType.IDENTIFIER):
+            alias_token = self._advance()
+            return AliasColumnNode(column_name, alias_token.lexeme, col_token.line, col_token.col)
+
+        else:
+            # 无别名
+            return ColumnNode(column_name, col_token.line, col_token.col)
+
+    # ★ 新增：复杂表达式解析（支持逻辑运算）
+    def _parse_or_expression(self) -> ASTNode:
+        """解析OR表达式（最低优先级）"""
+        left = self._parse_and_expression()
+
+        while self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "OR":
+            op_token = self._advance()
+            right = self._parse_and_expression()
+            left = LogicalOpNode(left, "OR", right, op_token.line, op_token.col)
+
+        return left
+
+    def _parse_and_expression(self) -> ASTNode:
+        """解析AND表达式"""
+        left = self._parse_not_expression()
+
+        while self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "AND":
+            op_token = self._advance()
+            right = self._parse_not_expression()
+            left = LogicalOpNode(left, "AND", right, op_token.line, op_token.col)
+
+        return left
+
+    def _parse_not_expression(self) -> ASTNode:
+        """解析NOT表达式"""
+        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "NOT":
+            not_token = self._advance()
+            expr = self._parse_comparison_expression()
+            return NotNode(expr, not_token.line, not_token.col)
+
+        return self._parse_comparison_expression()
+
+    def _parse_comparison_expression(self) -> ASTNode:
+        """★ 替换：解析比较表达式（支持所有比较操作）"""
+        left = self._parse_primary()
+
+        # ★ 扩展：支持多种比较操作
+        if self._check(TokenType.OPERATOR):
+            op_token = self._advance()
+            operator = op_token.lexeme
+            right = self._parse_primary()
+            return BinaryOpNode(left, operator, right, op_token.line, op_token.col)
+
+        elif self._check(TokenType.KEYWORD):
+            keyword = self._peek().lexeme.upper()
+
+            if keyword == "LIKE":
+                return self._parse_like_expression(left)
+            elif keyword == "IN":
+                return self._parse_in_expression(left)
+            elif keyword == "BETWEEN":
+                return self._parse_between_expression(left)
+            elif keyword == "IS":
+                return self._parse_is_null_expression(left)
+
+        return left
+
+    def _parse_like_expression(self, left: ASTNode) -> LikeNode:
+        """★ 新增：解析LIKE表达式"""
+        like_token = self._advance()  # 消费LIKE
+        pattern = self._parse_primary()
+        return LikeNode(left, pattern, False, like_token.line, like_token.col)
+
+    def _parse_in_expression(self, left: ASTNode) -> InNode:
+        """★ 新增：解析IN表达式（支持子查询）"""
+        in_token = self._advance()  # 消费IN
+
+        self._consume(TokenType.DELIMITER, "(", "Expected '(' after IN")
+
+        # 检查是否是子查询
+        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "SELECT":
+            self._advance()  # ★ 关键：先消费 SELECT，让 _parse_select() 的“SELECT已匹配”假设成立
+            subquery = self._parse_select()
+            self._consume(TokenType.DELIMITER, ")", "Expected ')' after subquery")
+            return InNode(left, [], False, subquery, in_token.line, in_token.col)
+        else:
+            # 常量列表
+            values = []
+            values.append(self._parse_value())
+
+            while True:
+                if self._check(TokenType.DELIMITER) and self._peek().lexeme == ",":
+                    self._advance()  # 消费逗号
+                    values.append(self._parse_value())
+                else:
+                    break
+
+            self._consume(TokenType.DELIMITER, ")", "Expected ')' after value list")
+            return InNode(left, values, False, None, in_token.line, in_token.col)
+
+    def _parse_between_expression(self, left: ASTNode) -> BetweenNode:
+        """★ 新增：解析BETWEEN表达式"""
+        between_token = self._advance()  # 消费BETWEEN
+
+        min_val = self._parse_primary()
+        self._consume(TokenType.KEYWORD, "AND", "Expected 'AND' in BETWEEN expression")
+        max_val = self._parse_primary()
+
+        return BetweenNode(left, min_val, max_val, False, between_token.line, between_token.col)
+
+    def _parse_is_null_expression(self, left: ASTNode) -> IsNullNode:
+        """★ 新增：解析IS NULL表达式"""
+        is_token = self._advance()  # 消费IS
+
+        # 检查NOT
+        is_not = False
+        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "NOT":
+            self._advance()  # 消费NOT
+            is_not = True
+
+        self._consume(TokenType.KEYWORD, "NULL", "Expected 'NULL' after IS [NOT]")
+
+        return IsNullNode(left, is_not, is_token.line, is_token.col)
+
 
     def _parse_delete(self) -> DeleteNode:
         """解析DELETE语句"""
@@ -607,20 +820,20 @@ class Parser:
         raise ParseError(self._peek().line, self._peek().col,
                          "Unsupported ALTER TABLE sub-clause",
                          "RENAME TO / ADD COLUMN / MODIFY COLUMN / CHANGE / DROP COLUMN")
+
     def _parse_expression(self) -> ASTNode:
-        """解析表达式"""
-        left = self._parse_primary()
-
-        if self._check(TokenType.OPERATOR):
-            op_token = self._advance()
-            operator = op_token.lexeme
-            right = self._parse_primary()
-            return BinaryOpNode(left, operator, right, op_token.line, op_token.col)
-
-        return left
+        """解析表达式（向后兼容，重定向到新的解析器）"""
+        return self._parse_or_expression()
 
     def _parse_primary(self) -> ASTNode:
-        """解析基本表达式"""
+        """解析基本表达式（补充：支持( ... )）"""
+        # 括号表达式
+        if self._check(TokenType.DELIMITER) and self._peek().lexeme == "(":
+            lpar = self._advance()  # '('
+            expr = self._parse_or_expression()  # 按当前优先级体系解析内部
+            self._consume(TokenType.DELIMITER, ")", "Expected ')' after parenthesized expression")
+            return expr
+
         if self._check(TokenType.NUMBER):
             token = self._advance()
             try:
@@ -761,5 +974,60 @@ def test_parser():
         except ParseError as e:
             print(f"❌ 语法错误: {e.hint}")
 
+
+def test_s5_parser_extensions():
+    """测试S5语法扩展"""
+    print("=== S5 Parser扩展测试 ===")
+
+    parser = Parser()
+
+    test_cases = [
+        # DISTINCT
+        ("SELECT DISTINCT name FROM users;", "DISTINCT查询"),
+        ("SELECT DISTINCT id, name FROM users;", "DISTINCT多列"),
+
+        # 别名
+        ("SELECT id AS user_id FROM users;", "AS别名"),
+        ("SELECT name username FROM users;", "隐式别名"),
+        ("SELECT id AS user_id, name AS username FROM users;", "多列别名"),
+
+        # 复杂WHERE
+        ("SELECT * FROM users WHERE age > 18 AND name LIKE 'A%';", "AND + LIKE"),
+        ("SELECT * FROM users WHERE age IN (18, 19, 20);", "IN常量列表"),
+        ("SELECT * FROM users WHERE age BETWEEN 18 AND 25;", "BETWEEN"),
+        ("SELECT * FROM users WHERE email IS NULL;", "IS NULL"),
+        ("SELECT * FROM users WHERE status IS NOT NULL;", "IS NOT NULL"),
+        ("SELECT * FROM users WHERE age > 18 OR name = 'Admin';", "OR逻辑"),
+        ("SELECT * FROM users WHERE NOT (age < 18);", "NOT逻辑"),
+
+        # 组合查询
+        ("SELECT DISTINCT name AS username FROM users WHERE age > 18;", "DISTINCT+别名+WHERE"),
+
+        # 子查询（基础）
+        ("SELECT * FROM users WHERE id IN (SELECT user_id FROM orders);", "IN子查询"),
+    ]
+
+    for i, (sql, desc) in enumerate(test_cases, 1):
+        print(f"\n[测试 {i}] {desc}")
+        print(f"SQL: {sql}")
+        try:
+            ast = parser.parse(sql)
+            print("✓ 解析成功")
+
+            # 显示关键特性
+            if isinstance(ast, SelectNode):
+                if ast.distinct:
+                    print("   特性: DISTINCT")
+                for col in ast.columns:
+                    if isinstance(col, AliasColumnNode):
+                        print(f"   特性: 别名 {col.column_name} AS {col.alias}")
+                if ast.where_clause:
+                    condition_type = type(ast.where_clause.condition).__name__
+                    print(f"   特性: WHERE ({condition_type})")
+
+        except ParseError as e:
+            print(f"❌ 语法错误: {e.hint}")
+        except Exception as e:
+            print(f"❌ 其他错误: {e}")
 if __name__ == "__main__":
-    test_parser()
+    test_s5_parser_extensions()

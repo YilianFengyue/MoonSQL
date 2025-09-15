@@ -33,8 +33,10 @@ import re
 from typing import Dict, List, Any, Iterator, Optional, Union, Callable
 from abc import ABC, abstractmethod
 
-from storage import storage_engine
+# from storage import storage_engine
 
+from src.sql.expressions import ExpressionEvaluator, ExpressionError
+from src.engine.distinct import DistinctOperator as BaseDistinctOperator
 
 class ExecutionError(Exception):
     """执行错误"""
@@ -87,6 +89,15 @@ class CreateTableOperator(Operator):
                 col_def["max_length"] = int(m.group(1))
             else:
                 col_def["type"] = raw_type
+                # ★ 新增：支持 {"type":"VARCHAR", "max_length": 50} 格式
+                if raw_type == "VARCHAR":
+                    ml = col.get("max_length")
+                    if ml is None:
+                        raise ExecutionError("CREATE TABLE: VARCHAR必须指定max_length")
+                    try:
+                        col_def["max_length"] = int(ml)
+                    except (TypeError, ValueError):
+                        raise ExecutionError(f"CREATE TABLE: 无效的VARCHAR长度: {ml}")
 
             # ★ 新增：处理约束信息
             if "constraints" in col:
@@ -243,7 +254,7 @@ class SeqScanOperator(Operator):
 
 
 class FilterOperator(Operator):
-    """过滤算子"""
+    """过滤算子（★ S5增强版：集成表达式引擎）"""
 
     def __init__(self, plan: Dict[str, Any], catalog_mgr=None):
         super().__init__(plan, catalog_mgr)
@@ -258,132 +269,141 @@ class FilterOperator(Operator):
         if not self.condition:
             raise ExecutionError("Filter: 缺少过滤条件")
 
+        # ★ 新增：初始化表达式求值器
+        self.evaluator = ExpressionEvaluator(subquery_executor=self._execute_subquery)
+
     def execute(self, storage_engine) -> Iterator[Dict[str, Any]]:
-        """执行过滤操作"""
+        """执行过滤操作（★ 使用新表达式引擎）"""
         if not self.children:
             raise ExecutionError("Filter: 缺少子算子")
 
         # 获取子算子的结果
         child_results = self.children[0].execute(storage_engine)
 
-        # 应用过滤条件
+        # ★ 修改：使用表达式引擎进行过滤
         for row in child_results:
-            if self._evaluate_condition(row, self.condition):
-                yield row
+            try:
+                if self.evaluator.evaluate(self.condition, row):
+                    yield row
+            except ExpressionError as e:
+                raise ExecutionError(f"表达式求值失败: {e}")
 
-    def _evaluate_condition(self, row: Dict[str, Any], condition: Dict[str, Any]) -> bool:
-        """评估过滤条件"""
-        cond_type = condition.get('type')
-
-        if cond_type == 'compare':
-            # 比较条件: {"type": "compare", "left": "age", "op": ">", "right": 18}
-            left_val = self._get_value(row, condition['left'])
-            right_val = self._get_value(row, condition['right'])
-            op = condition['op']
-
-            return self._compare_values(left_val, right_val, op)
-
-        elif cond_type == 'and':
-            # AND条件: {"type": "and", "left": cond1, "right": cond2}
-            left_result = self._evaluate_condition(row, condition['left'])
-            right_result = self._evaluate_condition(row, condition['right'])
-            return left_result and right_result
-
-        elif cond_type == 'or':
-            # OR条件: {"type": "or", "left": cond1, "right": cond2}
-            left_result = self._evaluate_condition(row, condition['left'])
-            right_result = self._evaluate_condition(row, condition['right'])
-            return left_result or right_result
-
-        elif cond_type == 'not':
-            # NOT条件: {"type": "not", "condition": cond}
-            inner_result = self._evaluate_condition(row, condition['condition'])
-            return not inner_result
-
-        else:
-            raise ExecutionError(f"不支持的条件类型: {cond_type}")
-
-    def _get_value(self, row: Dict[str, Any], ref) -> Any:
-        """获取值：可能是列名或常量"""
-        if isinstance(ref, str):
-            # 列名
-            return row.get(ref)
-        else:
-            # 常量
-            return ref
+    def _execute_subquery(self, subquery_expr: Dict[str, Any]) -> List[Any]:
+        """★ 新增：执行子查询（IN操作需要）"""
+        # 这里需要递归调用执行器来执行子查询
+        # 简化实现：暂时抛出异常，等后续扩展
+        raise ExecutionError("子查询功能尚未完全实现")
 
     def _parse_predicate_string(self, pred: str):
-        """
-        ★ 将 'col op value' 形式的字符串解析为 condition 字典
-          支持: =, ==, !=, <>, <, <=, >, >=, LIKE
-          覆盖 WHERE age > 20 / name = 'Alice' 这类简单场景
-        """
-        s = pred.strip()
-        m = re.match(r"^\s*([A-Za-z_]\w*)\s*(=|==|!=|<>|<=|>=|<|>|LIKE)\s*(.+?)\s*$", s, re.IGNORECASE)
-        if not m:
-            return None
-        col, op, right = m.groups()
-        right = right.strip()
-        # 去引号/尝试转数字
-        if (right.startswith("'") and right.endswith("'")) or (right.startswith('"') and right.endswith('"')):
-            rv = right[1:-1]
-        else:
-            try:
-                rv = int(right)
-            except ValueError:
-                try:
-                    rv = float(right)
-                except ValueError:
-                    rv = right
-        return {"type": "compare", "left": col, "op": op.upper(), "right": rv}
-
-    def _compare_values(self, left: Any, right: Any, op: str) -> bool:
-        """比较两个值"""
-        # 处理NULL值
-        if left is None or right is None:
-            if op in ['=', '==']:
-                return left is None and right is None
-            elif op in ['!=', '<>', '≠']:
-                return not (left is None and right is None)
-            else:
-                return False  # NULL与任何值比较大小都返回False
-
-        # 类型转换
+        """★ 保留：向后兼容的字符串解析"""
+        # 导入解析函数
         try:
-            if isinstance(left, str) and isinstance(right, (int, float)):
-                left = float(left) if '.' in left else int(left)
-            elif isinstance(right, str) and isinstance(left, (int, float)):
-                right = float(right) if '.' in right else int(right)
-        except ValueError:
-            pass  # 转换失败，按原类型比较
+            from sql.expressions import parse_simple_expression
+            return parse_simple_expression(pred)
+        except:
+            # 兜底：使用原有简单解析
+            s = pred.strip()
+            m = re.match(r"^\s*([A-Za-z_]\w*)\s*(=|==|!=|<>|<=|>=|<|>|LIKE)\s*(.+?)\s*$", s, re.IGNORECASE)
+            if not m:
+                return None
+            col, op, right = m.groups()
+            right = right.strip()
+            if (right.startswith("'") and right.endswith("'")) or (right.startswith('"') and right.endswith('"')):
+                rv = right[1:-1]
+            else:
+                try:
+                    rv = int(right)
+                except ValueError:
+                    try:
+                        rv = float(right)
+                    except ValueError:
+                        rv = right
+            return {"type": "compare", "left": col, "op": op.upper(), "right": rv}
 
-        # 执行比较
-        if op in ['=', '==']:
-            return left == right
-        elif op in ['!=', '<>', '≠']:
-            return left != right
-        elif op == '<':
-            return left < right
-        elif op == '<=':
-            return left <= right
-        elif op == '>':
-            return left > right
-        elif op == '>=':
-            return left >= right
-        elif op.upper() == 'LIKE':
-            return self._like_match(str(left), str(right))
-        else:
-            raise ExecutionError(f"不支持的比较操作符: {op}")
+    def _convert_ast_to_expression(self, ast_node) -> Dict[str, Any]:
+        """★ 新增：将AST节点转换为表达式字典"""
+        from sql.parser import (BinaryOpNode, ColumnNode, ValueNode,
+                                  InNode, BetweenNode, LikeNode, IsNullNode,
+                                  LogicalOpNode, NotNode, AliasColumnNode)
 
-    def _like_match(self, text: str, pattern: str) -> bool:
-        """LIKE模式匹配"""
-        # 简单实现：将SQL的LIKE转为Python正则
-        regex_pattern = pattern.replace('%', '.*').replace('_', '.')
-        return re.match(f"^{regex_pattern}$", text, re.IGNORECASE) is not None
+        if hasattr(ast_node, '__class__'):
+            node_type = ast_node.__class__.__name__
+
+            if node_type == "BinaryOpNode":
+                return {
+                    "type": "compare",
+                    "left": self._extract_node_value(ast_node.left),
+                    "op": ast_node.operator,
+                    "right": self._extract_node_value(ast_node.right)
+                }
+
+            elif node_type == "LogicalOpNode":
+                return {
+                    "type": ast_node.operator.lower(),  # "and" or "or"
+                    "left": self._convert_ast_to_expression(ast_node.left),
+                    "right": self._convert_ast_to_expression(ast_node.right)
+                }
+
+            elif node_type == "NotNode":
+                return {
+                    "type": "not",
+                    "condition": self._convert_ast_to_expression(ast_node.expr)
+                }
+
+            elif node_type == "LikeNode":
+                return {
+                    "type": "like",
+                    "left": self._extract_node_value(ast_node.left),
+                    "right": self._extract_node_value(ast_node.pattern)
+                }
+
+            elif node_type == "InNode":
+                expr_dict = {
+                    "type": "in",
+                    "left": self._extract_node_value(ast_node.left)
+                }
+                if ast_node.subquery:
+                    expr_dict["subquery"] = self._convert_ast_to_expression(ast_node.subquery)
+                else:
+                    expr_dict["values"] = [self._extract_node_value(v) for v in ast_node.values]
+                return expr_dict
+
+            elif node_type == "BetweenNode":
+                return {
+                    "type": "between",
+                    "left": self._extract_node_value(ast_node.expr),
+                    "min": self._extract_node_value(ast_node.min_val),
+                    "max": self._extract_node_value(ast_node.max_val)
+                }
+
+            elif node_type == "IsNullNode":
+                return {
+                    "type": "is_null",
+                    "left": self._extract_node_value(ast_node.expr),
+                    "is_null": not ast_node.is_not
+                }
+
+        # 兜底处理
+        return {"type": "compare", "left": "unknown", "op": "=", "right": None}
+
+    def _evaluate_condition(self, row: Dict[str, Any], condition: Dict[str, Any]) -> bool:
+        return self.evaluator.evaluate(condition, row)
+
+    def _extract_node_value(self, node) -> Any:
+        """★ 新增：从AST节点提取值"""
+        from sql.parser import ColumnNode, ValueNode
+
+        if hasattr(node, '__class__'):
+            if node.__class__.__name__ == "ColumnNode":
+                return node.name
+            elif node.__class__.__name__ == "ValueNode":
+                return node.value
+
+        return node
 
 
 class ProjectOperator(Operator):
-    """投影算子"""
+    """投影算子（★ S5增强版：支持别名）"""
 
     def __init__(self, plan: Dict[str, Any], catalog_mgr=None):
         super().__init__(plan, catalog_mgr)
@@ -392,7 +412,7 @@ class ProjectOperator(Operator):
             raise ExecutionError("Project: 缺少投影列")
 
     def execute(self, storage_engine) -> Iterator[Dict[str, Any]]:
-        """执行投影操作"""
+        """执行投影操作（★ 支持别名处理）"""
         if not self.children:
             raise ExecutionError("Project: 缺少子算子")
 
@@ -402,14 +422,33 @@ class ProjectOperator(Operator):
         # 投影指定列
         for row in child_results:
             projected_row = {}
-            for col in self.columns:
-                if col == '*':
+            for col_spec in self.columns:
+                if col_spec == '*':
                     # SELECT * 展开所有列
                     projected_row.update(row)
+                elif isinstance(col_spec, str):
+                    # 简单列名
+                    projected_row[col_spec] = row.get(col_spec)
+                elif isinstance(col_spec, dict):
+                    # ★ 新增：支持别名格式 {"name": "id", "alias": "user_id"}
+                    if "alias" in col_spec:
+                        col_name = col_spec["name"]
+                        alias = col_spec["alias"]
+                        projected_row[alias] = row.get(col_name)
+                    else:
+                        # 无别名的字典格式
+                        col_name = col_spec.get("name", col_spec)
+                        projected_row[col_name] = row.get(col_name)
                 else:
-                    # 具体列名
-                    projected_row[col] = row.get(col)
+                    # 兜底：当作列名处理
+                    projected_row[str(col_spec)] = row.get(str(col_spec))
+
             yield projected_row
+
+# ★ 新增：DistinctOperator（继承自distinct.py）
+class DistinctOperator(BaseDistinctOperator):
+    """DISTINCT算子（继承自独立模块）"""
+    pass
 
 
 class DeleteOperator(Operator):
@@ -771,10 +810,11 @@ class Executor:
     """SQL执行引擎（支持 SHOW/DESC/ALTER）"""
 
     def __init__(self, storage_engine, catalog_mgr=None):
+        """★ 替换：Executor构造函数，添加新算子"""
         self.storage_engine = storage_engine
         self.catalog_mgr = catalog_mgr
 
-        # 算子工厂
+        # ★ 修改：算子工厂添加DISTINCT
         self.operator_classes = {
             'CreateTable': CreateTableOperator,
             'Insert': InsertOperator,
@@ -783,7 +823,8 @@ class Executor:
             'Project': ProjectOperator,
             'Delete': DeleteOperator,
             'Update': UpdateOperator,
-            # ★ 新增DDL算子
+            'Distinct': DistinctOperator,  # ★ 新增
+            # DDL算子
             'ShowTables': ShowTablesOperator,
             'Desc': DescOperator,
             'AlterTable': AlterTableOperator,
@@ -835,8 +876,145 @@ class Executor:
         """执行计划并返回完整结果列表(便于测试)"""
         return list(self.execute(plan))
 
+    # ★ 新增：辅助函数，用于处理复杂计划转换
+    def convert_ast_condition_to_plan(condition_ast) -> Dict[str, Any]:
+        """
+        ★ 新增：将复杂AST条件转换为执行计划格式
+        供Planner调用
+        """
+        # 创建临时FilterOperator进行转换
+        temp_filter = FilterOperator({})
+        return temp_filter._convert_ast_to_expression(condition_ast)
 
 # ==================== 测试代码 ====================
+def test_s5_executor_features():
+    """测试S5执行器新功能"""
+    print("=== S5 Executor新功能测试 ===")
+
+    # 导入依赖
+    try:
+        from storage.storage_engine import StorageEngine
+        from engine.catalog_mgr import CatalogManager
+    except ImportError:
+        print("❌ 无法导入依赖，跳过测试")
+        return
+
+    # 创建测试环境
+    storage = StorageEngine("test_s5_data", buffer_capacity=8)
+    catalog = CatalogManager(storage)
+    executor = Executor(storage, catalog)
+
+    print("\n1. 创建测试表:")
+
+    create_plan = {
+        "op": "CreateTable",
+        "table": "test_s5",
+        "columns": [
+            {"name": "id", "type": "INT"},
+            {"name": "name", "type": "VARCHAR", "max_length": 50},
+            {"name": "age", "type": "INT"},
+            {"name": "status", "type": "VARCHAR", "max_length": 10}
+        ]
+    }
+
+    results = list(executor.execute(create_plan))
+    print(f"   建表结果: {results[0]['status']}")
+
+    print("\n2. 插入测试数据:")
+
+    test_data = [
+        {"id": 1, "name": "Alice", "age": 25, "status": "active"},
+        {"id": 2, "name": "Bob", "age": 30, "status": "inactive"},
+        {"id": 3, "name": "Alice", "age": 25, "status": "active"},  # 重复
+        {"id": 4, "name": "Charlie", "age": 22, "status": None},
+        {"id": 5, "name": "David", "age": 28, "status": "active"},
+    ]
+
+    for data in test_data:
+        insert_plan = {
+            "op": "Insert",
+            "table": "test_s5",
+            "values": [{"value": v, "type": "STRING" if isinstance(v, str) else "NUMBER" if v is not None else "NULL"}
+                       for v in data.values()]
+        }
+        list(executor.execute(insert_plan))
+
+    print(f"   插入{len(test_data)}行数据")
+
+    print("\n3. 测试DISTINCT:")
+
+    distinct_plan = {
+        "op": "Distinct",
+        "child": {
+            "op": "SeqScan",
+            "table": "test_s5"
+        }
+    }
+
+    distinct_results = list(executor.execute(distinct_plan))
+    print(f"   DISTINCT结果: {len(distinct_results)}行（原始{len(test_data)}行）")
+
+    print("\n4. 测试别名投影:")
+
+    alias_plan = {
+        "op": "Project",
+        "columns": [
+            {"name": "id", "alias": "user_id"},
+            {"name": "name", "alias": "username"},
+            "age"  # 无别名
+        ],
+        "child": {
+            "op": "SeqScan",
+            "table": "test_s5"
+        }
+    }
+
+    alias_results = list(executor.execute(alias_plan))
+    print(f"   别名投影结果: {len(alias_results)}行")
+    if alias_results:
+        print(f"   列名: {list(alias_results[0].keys())}")
+
+    print("\n5. 测试复杂WHERE条件:")
+
+    complex_filter_plan = {
+        "op": "Filter",
+        "condition": {
+            "type": "and",
+            "left": {"type": "compare", "left": "age", "op": ">", "right": 20},
+            "right": {"type": "like", "left": "name", "right": "A%"}
+        },
+        "child": {
+            "op": "SeqScan",
+            "table": "test_s5"
+        }
+    }
+
+    complex_results = list(executor.execute(complex_filter_plan))
+    print(f"   复杂过滤结果: {len(complex_results)}行")
+
+    print("\n6. 测试IS NULL:")
+
+    null_filter_plan = {
+        "op": "Filter",
+        "condition": {
+            "type": "is_null",
+            "left": "status",
+            "is_null": True
+        },
+        "child": {
+            "op": "SeqScan",
+            "table": "test_s5"
+        }
+    }
+
+    null_results = list(executor.execute(null_filter_plan))
+    print(f"   IS NULL结果: {len(null_results)}行")
+
+    # 清理
+    storage.close()
+
+    print("\n✓ S5执行器功能测试完成")
+
 
 def test_executor_basic():
     """测试执行引擎基本功能"""
@@ -844,7 +1022,7 @@ def test_executor_basic():
 
     # 导入存储引擎
     try:
-        from ..storage.storage_engine import StorageEngine
+        from storage.storage_engine import StorageEngine
     except ImportError:
         import sys
         import os
@@ -1093,7 +1271,7 @@ def test_ddl_operations():
     print("\n=== DDL操作测试 ===")
 
     try:
-        from ..storage.storage_engine import StorageEngine
+        from storage.storage_engine import StorageEngine
     except ImportError:
         import sys
         import os
@@ -1162,4 +1340,4 @@ def run_all_executor_tests():
 
 
 if __name__ == "__main__":
-    run_all_executor_tests()
+    test_s5_executor_features()
