@@ -198,6 +198,7 @@
 如果你愿意，我可以把 **Phase 0–A1** 的最小代码骨架（文件清单 + 函数签名 + 假实现）直接给成“可运行”版本，后续你只需要替换具体实现即可。
 
 
+
 ```
 MoonSQL
 ├─ data
@@ -216,12 +217,14 @@ MoonSQL
 │  ├─ client
 │  │  └─ __init__.py
 │  ├─ engine
+│  │  ├─ aggregate.py
 │  │  ├─ catalog_mgr.py
 │  │  ├─ constraints.py
 │  │  ├─ constraint_validator.py
 │  │  ├─ distinct.py
 │  │  ├─ executor.py
 │  │  ├─ interfaces.py
+│  │  ├─ sort.py
 │  │  ├─ test_catalog_data
 │  │  │  ├─ sys_columns.tbl
 │  │  │  ├─ sys_indexes.tbl
@@ -235,6 +238,12 @@ MoonSQL
 │  │  ├─ test_complex_data
 │  │  │  ├─ employees.tbl
 │  │  │  └─ tables_metadata.json
+│  │  ├─ test_error_data
+│  │  │  ├─ sys_columns.tbl
+│  │  │  ├─ sys_foreign_keys.tbl
+│  │  │  ├─ sys_indexes.tbl
+│  │  │  ├─ sys_tables.tbl
+│  │  │  └─ tables_metadata.json
 │  │  ├─ test_executor_data
 │  │  │  ├─ tables_metadata.json
 │  │  │  └─ test_exec.tbl
@@ -245,20 +254,22 @@ MoonSQL
 │  │  │  ├─ sys_tables.tbl
 │  │  │  ├─ tables_metadata.json
 │  │  │  └─ test_s5.tbl
+│  │  ├─ test_s6s7_data
+│  │  │  ├─ employees.tbl
+│  │  │  ├─ sys_columns.tbl
+│  │  │  ├─ sys_foreign_keys.tbl
+│  │  │  ├─ sys_indexes.tbl
+│  │  │  ├─ sys_tables.tbl
+│  │  │  └─ tables_metadata.json
 │  │  └─ __init__.py
 │  ├─ main.py
 │  ├─ minidb_data
-│  │  ├─ departments.tbl
 │  │  ├─ employees.tbl
 │  │  ├─ sys_columns.tbl
 │  │  ├─ sys_foreign_keys.tbl
 │  │  ├─ sys_indexes.tbl
 │  │  ├─ sys_tables.tbl
-│  │  ├─ tables_metadata.json
-│  │  ├─ test.tbl
-│  │  ├─ test_debug.tbl
-│  │  ├─ test_fix.tbl
-│  │  └─ users.tbl
+│  │  └─ tables_metadata.json
 │  ├─ sql
 │  │  ├─ expressions.py
 │  │  ├─ lexer.py
@@ -286,6 +297,14 @@ MoonSQL
 │  │  └─ __init__.py
 │  ├─ tests
 │  │  ├─ bad_cases.py
+│  │  ├─ test_s6s7_integration
+│  │  │  ├─ employees.tbl
+│  │  │  ├─ sys_columns.tbl
+│  │  │  ├─ sys_foreign_keys.tbl
+│  │  │  ├─ sys_indexes.tbl
+│  │  │  ├─ sys_tables.tbl
+│  │  │  └─ tables_metadata.json
+│  │  ├─ test_s6s7_integration.py
 │  │  ├─ test_sql.py
 │  │  └─ __init__.py
 │  ├─ wire

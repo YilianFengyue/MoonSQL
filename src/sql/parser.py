@@ -251,12 +251,30 @@ class LimitNode(ASTNode):
         self.offset = offset  # 跳过行数
 
 
+# ★ 新增：JOIN相关AST节点（添加到现有AST节点定义后）
 
-# ★ 完整替换：SelectNode支持完整SQL管线
+class TableRefNode(ASTNode):
+    """表引用节点（支持别名）"""
+    def __init__(self, table_name: str, alias: str = None, line: int = 0, col: int = 0):
+        super().__init__(line, col)
+        self.table_name = table_name
+        self.alias = alias
+
+class JoinNode(ASTNode):
+    """JOIN子句节点"""
+    def __init__(self, join_type: str, right_table: TableRefNode, on_condition: ASTNode, line: int = 0, col: int = 0):
+        super().__init__(line, col)
+        self.join_type = join_type.upper()  # "INNER", "LEFT", "RIGHT"
+        self.right_table = right_table
+        self.on_condition = on_condition
+
+
+# ★ 修改：SelectNode支持多表查询
 class SelectNode(ASTNode):
-    """SELECT语句节点（支持完整管线：DISTINCT, GROUP BY, HAVING, ORDER BY, LIMIT）"""
+    """SELECT语句节点（支持JOIN和完整管线）"""
+
     def __init__(self, columns: List[Union[ColumnNode, AliasColumnNode, AggregateFuncNode, str]],
-                 table_name: str,
+                 from_clause: Union[TableRefNode, List],  # ★ 修改：支持单表或表+JOIN列表
                  distinct: bool = False,
                  where_clause: Optional[WhereClauseNode] = None,
                  group_by: Optional[GroupByNode] = None,
@@ -266,13 +284,21 @@ class SelectNode(ASTNode):
                  line: int = 0, col: int = 0):
         super().__init__(line, col)
         self.columns = columns
-        self.table_name = table_name
+        self.from_clause = from_clause  # ★ 新设计：统一的FROM子句
         self.distinct = distinct
         self.where_clause = where_clause
-        self.group_by = group_by      # ★ 新增
-        self.having = having          # ★ 新增
-        self.order_by = order_by      # ★ 新增
-        self.limit = limit            # ★ 新增
+        self.group_by = group_by
+        self.having = having
+        self.order_by = order_by
+        self.limit = limit
+
+        # ★ 向后兼容：提供table_name属性
+        if isinstance(from_clause, TableRefNode):
+            self.table_name = from_clause.table_name
+        elif isinstance(from_clause, list) and len(from_clause) > 0:
+            self.table_name = from_clause[0].table_name if isinstance(from_clause[0], TableRefNode) else "multi_table"
+        else:
+            self.table_name = "unknown"
 
 
 
@@ -596,7 +622,7 @@ class Parser:
         return InsertNode(table_name, columns, values, table_token.line, table_token.col)
 
     def _parse_select(self) -> SelectNode:
-        """★ 完整替换：解析完整SELECT语句管线"""
+        """★ 完整替换：解析支持JOIN的SELECT语句"""
         select_token = self._previous()  # SELECT已经匹配
 
         # DISTINCT
@@ -605,7 +631,7 @@ class Parser:
             self._advance()
             distinct = True
 
-        # ★ 列列表解析（支持聚合函数）
+        # 列列表解析（复用现有逻辑）
         columns = []
         if self._check(TokenType.OPERATOR) and self._peek().lexeme == "*":
             self._advance()
@@ -623,23 +649,20 @@ class Parser:
         # FROM关键字
         self._consume(TokenType.KEYWORD, "FROM", "Expected 'FROM'")
 
-        # 表名
-        table_token = self._consume(TokenType.IDENTIFIER, None, "Expected table name")
-        table_name = table_token.lexeme
+        # ★ 新增：解析FROM子句（支持JOIN）
+        from_clause = self._parse_from_clause()
 
-        # ★ 可选的WHERE子句
+        # 其余子句保持不变
         where_clause = None
         if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "WHERE":
             self._advance()
             condition = self._parse_or_expression()
             where_clause = WhereClauseNode(condition)
 
-        # ★ 新增：可选的GROUP BY子句
         group_by = None
         if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "GROUP":
             group_by = self._parse_group_by()
 
-        # ★ 新增：可选的HAVING子句（必须在GROUP BY之后）
         having = None
         if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "HAVING":
             if group_by is None:
@@ -647,12 +670,10 @@ class Parser:
                                  "HAVING clause requires GROUP BY clause")
             having = self._parse_having()
 
-        # ★ 新增：可选的ORDER BY子句
         order_by = None
         if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "ORDER":
             order_by = self._parse_order_by()
 
-        # ★ 新增：可选的LIMIT子句
         limit = None
         if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "LIMIT":
             limit = self._parse_limit()
@@ -665,9 +686,161 @@ class Parser:
         else:
             self._consume(TokenType.DELIMITER, ";", "Expected ';' at end of statement")
 
-        return SelectNode(columns, table_name, distinct, where_clause,
+        return SelectNode(columns, from_clause, distinct, where_clause,
                           group_by, having, order_by, limit,
                           select_token.line, select_token.col)
+
+    def _parse_from_clause(self) -> Union[TableRefNode, List]:
+        """★ 修复：解析FROM子句（支持隐式连接检测）"""
+        # 解析第一个表
+        main_table = self._parse_table_reference()
+
+        # ★ 新增：检查隐式连接（逗号分隔的表）
+        if self._check(TokenType.DELIMITER) and self._peek().lexeme == ",":
+            # 隐式连接：FROM A, B, C...
+            tables = [main_table]
+            while self._check(TokenType.DELIMITER) and self._peek().lexeme == ",":
+                self._advance()  # 消费逗号
+                table = self._parse_table_reference()
+                tables.append(table)
+
+            # ★ 简化处理：暂时不支持隐式连接，给出明确错误
+            raise ParseError(main_table.line, main_table.col,
+                             "Implicit joins (FROM A, B) are not yet supported. Use explicit JOIN syntax.")
+
+        # 检查是否有显式JOIN
+        joins = []
+        while self._check_join_keyword():
+            join_clause = self._parse_join_clause()
+            joins.append(join_clause)
+
+
+        # 如果没有JOIN，返回单表；否则返回[主表, JOIN1, JOIN2, ...]
+        if not joins:
+            result = main_table
+        else:
+            result = [main_table] + joins
+
+        # ★ 新增：校验 ON 子句中的前缀是否都是已声明的表名/别名
+        known = self._gather_known_table_names(result)
+        if isinstance(result, list):
+            for j in result[1:]:
+                # 只检查 JOIN 节点
+                if isinstance(j, JoinNode):
+                    for prefix, l, c in self._iter_qualified_prefixes(j.on_condition):
+                        if prefix not in known:
+                            raise ParseError(l, c, f"Unknown table or alias '{prefix}' in JOIN condition")
+
+        return result
+
+    def _parse_table_reference(self) -> TableRefNode:
+        """★ 新增：解析表引用（支持别名）"""
+        table_token = self._consume(TokenType.IDENTIFIER, None, "Expected table name")
+        table_name = table_token.lexeme
+
+        # 检查别名
+        alias = None
+        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "AS":
+            self._advance()
+            alias_token = self._consume(TokenType.IDENTIFIER, None, "Expected table alias")
+            alias = alias_token.lexeme
+        elif self._check(TokenType.IDENTIFIER):
+            # 隐式别名（无 AS），但不得是保留词（JOIN 相关、子句关键字）
+            reserved = {"JOIN", "INNER", "LEFT", "RIGHT", "FULL", "OUTER",
+                        "ON", "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT"}
+            cand = self._peek().lexeme.upper()
+            if cand in reserved:
+                # 不把这些词当作别名使用，留给后续解析（例如 FULL JOIN）
+                pass
+            else:
+                alias_token = self._advance()
+                alias = alias_token.lexeme
+
+        return TableRefNode(table_name, alias, table_token.line, table_token.col)
+
+    def _check_join_keyword(self) -> bool:
+        """★ 修复：把 FULL/LEFT/RIGHT/INNER/JOIN 视为 JOIN 关键字，即便被当成 IDENTIFIER"""
+        if self._is_at_end():
+            return False
+        tok = self._peek()
+        if tok.type not in (TokenType.KEYWORD, TokenType.IDENTIFIER):
+            return False
+        return tok.lexeme.upper() in {"JOIN", "INNER", "LEFT", "RIGHT", "FULL"}
+
+    def _parse_join_clause(self) -> JoinNode:
+        """★ 修复：解析JOIN子句（修复OUTER关键字处理）"""
+        join_start_token = self._peek()
+
+        # 解析JOIN类型
+        join_type = "INNER"  # 默认内连接
+
+        if (self._check(TokenType.KEYWORD)
+                or (self._check(TokenType.IDENTIFIER) and self._peek().lexeme.upper() in {"JOIN", "INNER", "LEFT",
+                                                                                          "RIGHT", "FULL"})):
+            first_keyword = self._peek().lexeme.upper()
+
+            if first_keyword == "INNER":
+                self._advance()  # 消费INNER
+                self._consume(TokenType.KEYWORD, "JOIN", "Expected 'JOIN' after 'INNER'")
+                join_type = "INNER"
+
+            elif first_keyword == "LEFT":
+                self._advance()  # 消费LEFT
+                # ★ 修复：可选的OUTER
+                if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "OUTER":
+                    self._advance()  # 消费OUTER
+                self._consume(TokenType.KEYWORD, "JOIN", "Expected 'JOIN' after 'LEFT [OUTER]'")
+                join_type = "LEFT"
+
+            elif first_keyword == "RIGHT":
+                self._advance()  # 消费RIGHT
+                # ★ 修复：可选的OUTER
+                if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "OUTER":
+                    self._advance()  # 消费OUTER
+                self._consume(TokenType.KEYWORD, "JOIN", "Expected 'JOIN' after 'RIGHT [OUTER]'")
+                join_type = "RIGHT"
+
+            elif first_keyword == "JOIN":
+                self._advance()  # 消费JOIN
+                join_type = "INNER"  # 默认内连接
+
+            elif first_keyword == "FULL":
+                # ★ 新增：FULL JOIN报错
+                raise ParseError(join_start_token.line, join_start_token.col,
+                                 "FULL OUTER JOIN is not supported")
+
+            else:
+                raise ParseError(join_start_token.line, join_start_token.col,
+                                 f"Unexpected keyword in JOIN: {first_keyword}")
+
+        # 解析右表
+        right_table = self._parse_table_reference()
+
+        # ON关键字
+        self._consume(TokenType.KEYWORD, "ON", "Expected 'ON' after JOIN table")
+
+        # ON条件（复用表达式解析）
+        on_condition = self._parse_or_expression()
+
+        return JoinNode(join_type, right_table, on_condition,
+                        join_start_token.line, join_start_token.col)
+
+    # ★ 新增：支持表.列格式的列引用解析
+    def _parse_qualified_column(self) -> str:
+        """★ 新增：解析带表前缀的列名（table.column 或 alias.column）"""
+        first_token = self._consume(TokenType.IDENTIFIER, None, "Expected table or column name")
+
+        # 检查是否有点号
+        if self._check(TokenType.DELIMITER) and self._peek().lexeme == ".":
+            self._advance()  # 消费点号
+            second_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name after '.'")
+            return f"{first_token.lexeme}.{second_token.lexeme}"
+        else:
+            # 回退：这只是普通列名
+            self.current -= 1  # 回退一个token
+            return first_token.lexeme
+
+
 
     def _parse_select_column_or_aggregate(self) -> Union[ColumnNode, AliasColumnNode, AggregateFuncNode]:
         """★ 新增：解析SELECT列或聚合函数"""
@@ -684,63 +857,46 @@ class Parser:
         return self._parse_select_column()
 
     def _parse_aggregate_function(self) -> AggregateFuncNode:
-        """★ 新增：解析聚合函数"""
+        """★ 新增：解析聚合函数（支持表.列）"""
         func_token = self._consume(TokenType.IDENTIFIER, None, "Expected aggregate function name")
         func_name = func_token.lexeme.upper()
-
-        # 验证聚合函数名
         if func_name not in ["COUNT", "SUM", "AVG", "MIN", "MAX"]:
-            raise ParseError(func_token.line, func_token.col,
-                             f"Unknown aggregate function: {func_name}")
+            raise ParseError(func_token.line, func_token.col, f"Unknown aggregate function: {func_name}")
 
-        # 左括号
         self._consume(TokenType.DELIMITER, "(", f"Expected '(' after {func_name}")
 
-        # ★ 解析参数：COUNT(*)特殊处理
+        # COUNT(*) 特例；其他允许 table.column 或 column
         if func_name == "COUNT" and self._check(TokenType.OPERATOR) and self._peek().lexeme == "*":
-            self._advance()  # 消费*
+            self._advance()
             column = "*"
         else:
-            # 普通列名
-            col_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name")
-            column = col_token.lexeme
+            # 允许限定列
+            column = self._parse_qualified_column()
 
-        # 右括号
         self._consume(TokenType.DELIMITER, ")", f"Expected ')' after {func_name} argument")
 
-        # ★ 检查别名
+        # 可选别名
         alias = None
         if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "AS":
-            self._advance()  # 消费AS
+            self._advance()
             alias_token = self._consume(TokenType.IDENTIFIER, None, "Expected alias name")
             alias = alias_token.lexeme
         elif self._check(TokenType.IDENTIFIER):
-            # 隐式别名
             alias_token = self._advance()
             alias = alias_token.lexeme
 
         return AggregateFuncNode(func_name, column, alias, func_token.line, func_token.col)
 
     def _parse_group_by(self) -> GroupByNode:
-        """★ 新增：解析GROUP BY子句"""
-        group_token = self._advance()  # 消费GROUP
+        group_token = self._advance()  # 消费 GROUP
         self._consume(TokenType.KEYWORD, "BY", "Expected 'BY' after 'GROUP'")
 
-        # 分组列列表
         columns = []
+        columns.append(self._parse_qualified_column())  # 允许限定列
 
-        # 第一个列名
-        col_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name")
-        columns.append(col_token.lexeme)
-
-        # 更多列名
-        while True:
-            if self._check(TokenType.DELIMITER) and self._peek().lexeme == ",":
-                self._advance()  # 消费逗号
-                col_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name")
-                columns.append(col_token.lexeme)
-            else:
-                break
+        while self._check(TokenType.DELIMITER) and self._peek().lexeme == ",":
+            self._advance()  # 消费逗号
+            columns.append(self._parse_qualified_column())  # 允许限定列
 
         return GroupByNode(columns, group_token.line, group_token.col)
 
@@ -775,19 +931,23 @@ class Parser:
         return OrderByNode(sort_keys, order_token.line, order_token.col)
 
     def _parse_sort_key(self) -> Dict[str, str]:
-        """★ 新增：解析单个排序键"""
-        # ★ 支持列名或列序号（1,2,3...）
         if self._check(TokenType.NUMBER):
-            # 列序号形式：ORDER BY 1, 2 DESC
             num_token = self._advance()
-            column = f"__pos_{num_token.lexeme}"  # 特殊标记，Planner处理
+            column = f"__pos_{num_token.lexeme}"
         else:
-            # 列名形式：ORDER BY name, age DESC
-            col_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name or position")
-            column = col_token.lexeme
+            # 允许限定列或普通标识符
+            if self._check(TokenType.IDENTIFIER):
+                nxt = self.tokens[self.current + 1] if (self.current + 1) < len(self.tokens) else None
+                if nxt and nxt.type == TokenType.DELIMITER and nxt.lexeme == ".":
+                    column = self._parse_qualified_column()
+                else:
+                    col_token = self._advance()
+                    column = col_token.lexeme
+            else:
+                col_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name or position")
+                column = col_token.lexeme
 
-        # ★ 可选的ASC/DESC
-        order = "ASC"  # 默认升序
+        order = "ASC"
         if self._check(TokenType.KEYWORD):
             next_kw = self._peek().lexeme.upper()
             if next_kw in ["ASC", "DESC"]:
@@ -838,11 +998,10 @@ class Parser:
 
     # ★ 新增：表达式环境的聚合函数调用解析（无别名）
     def _parse_agg_call_in_expr(self) -> AggregateFuncNode:
-        """解析表达式中的聚合函数调用（HAVING/WHERE/ORDER BY中使用）"""
+        """解析表达式中的聚合函数调用（支持表.列）"""
         func_tok = self._consume(TokenType.IDENTIFIER, None, "Expected function name")
         func = func_tok.lexeme.upper()
         if func not in ["COUNT", "SUM", "AVG", "MIN", "MAX"]:
-            # 也可以选择：return ColumnNode(func) 但更安全是直接报"不支持的函数"
             raise ParseError(func_tok.line, func_tok.col, f"Unsupported function in expression: {func}")
 
         self._consume(TokenType.DELIMITER, "(", f"Expected '(' after {func}")
@@ -851,33 +1010,116 @@ class Parser:
             self._advance()
             col = "*"
         else:
-            col_tok = self._consume(TokenType.IDENTIFIER, None, "Expected column name")
-            col = col_tok.lexeme
+            col = self._parse_qualified_column()  # ★ 允许 table.column
 
         self._consume(TokenType.DELIMITER, ")", f"Expected ')' to close {func}(")
         return AggregateFuncNode(func, col, alias=None, line=func_tok.line, col=func_tok.col)
 
-
     def _parse_select_column(self) -> Union[ColumnNode, AliasColumnNode]:
-        """★ 新增：解析SELECT列（支持别名）"""
-        # 列名
-        col_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name")
-        column_name = col_token.lexeme
+        """★ 修复：解析SELECT列（支持表.列引用和别名）"""
+        # ★ 修复：检查是否为表.列格式
+        if self._check(TokenType.IDENTIFIER):
+            first_token = self._peek()
 
-        # 检查是否有AS别名
-        if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "AS":
-            self._advance()  # 消费AS
-            alias_token = self._consume(TokenType.IDENTIFIER, None, "Expected alias name")
-            return AliasColumnNode(column_name, alias_token.lexeme, col_token.line, col_token.col)
+            # 检查下一个token是否为点号
+            next_token = self.tokens[self.current + 1] if (self.current + 1) < len(self.tokens) else None
 
-        # 检查隐式别名（无AS关键字）
-        elif self._check(TokenType.IDENTIFIER):
-            alias_token = self._advance()
-            return AliasColumnNode(column_name, alias_token.lexeme, col_token.line, col_token.col)
+            if next_token and next_token.type == TokenType.DELIMITER and next_token.lexeme == ".":
+                # 表.列格式：table.column
+                table_token = self._advance()  # 消费表名
+                self._advance()  # 消费点号
+                col_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name after '.'")
+                column_name = f"{table_token.lexeme}.{col_token.lexeme}"
 
+                # 检查别名
+                alias = None
+                if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "AS":
+                    self._advance()  # 消费AS
+                    alias_token = self._consume(TokenType.IDENTIFIER, None, "Expected alias name")
+                    alias = alias_token.lexeme
+                elif self._check(TokenType.IDENTIFIER):
+                    # 隐式别名
+                    alias_token = self._advance()
+                    alias = alias_token.lexeme
+
+                if alias:
+                    return AliasColumnNode(column_name, alias, table_token.line, table_token.col)
+                else:
+                    return ColumnNode(column_name, table_token.line, table_token.col)
+            else:
+                # 普通列名
+                col_token = self._advance()
+                column_name = col_token.lexeme
+
+                # 检查别名
+                alias = None
+                if self._check(TokenType.KEYWORD) and self._peek().lexeme.upper() == "AS":
+                    self._advance()  # 消费AS
+                    alias_token = self._consume(TokenType.IDENTIFIER, None, "Expected alias name")
+                    alias = alias_token.lexeme
+                elif self._check(TokenType.IDENTIFIER):
+                    # 隐式别名
+                    alias_token = self._advance()
+                    alias = alias_token.lexeme
+
+                if alias:
+                    return AliasColumnNode(column_name, alias, col_token.line, col_token.col)
+                else:
+                    return ColumnNode(column_name, col_token.line, col_token.col)
         else:
-            # 无别名
-            return ColumnNode(column_name, col_token.line, col_token.col)
+            # 兜底：期望标识符
+            col_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name")
+            return ColumnNode(col_token.lexeme, col_token.line, col_token.col)
+
+    def _gather_known_table_names(self, from_clause) -> set:
+        names = set()
+        if isinstance(from_clause, TableRefNode):
+            names.add(from_clause.alias or from_clause.table_name)
+        elif isinstance(from_clause, list) and from_clause:
+            main = from_clause[0]
+            if isinstance(main, TableRefNode):
+                names.add(main.alias or main.table_name)
+            for item in from_clause[1:]:
+                if isinstance(item, JoinNode):
+                    t = item.right_table
+                    names.add(t.alias or t.table_name)
+        return names
+
+    def _iter_qualified_prefixes(self, expr) -> List[tuple]:
+        out = []
+
+        def walk(node):
+            if node is None:
+                return
+            if isinstance(node, ColumnNode):
+                if isinstance(node.name, str) and "." in node.name:
+                    p = node.name.split(".", 1)[0]
+                    out.append((p, node.line, node.col))
+            elif isinstance(node, AliasColumnNode):
+                if "." in node.column_name:
+                    p = node.column_name.split(".", 1)[0]
+                    out.append((p, node.line, node.col))
+            elif isinstance(node, (BinaryOpNode, LogicalOpNode)):
+                walk(node.left);
+                walk(node.right)
+            elif isinstance(node, NotNode):
+                walk(node.expr)
+            elif isinstance(node, InNode):
+                walk(node.left)
+            elif isinstance(node, BetweenNode):
+                walk(node.expr);
+                walk(node.min_val);
+                walk(node.max_val)
+            elif isinstance(node, (LikeNode, IsNullNode)):
+                walk(node.left if hasattr(node, "left") else node.expr)
+            elif isinstance(node, AggregateFuncNode):
+                pass
+            elif isinstance(node, WhereClauseNode):
+                walk(node.condition)
+
+        walk(expr)
+        return out
+
 
     # ★ 新增：复杂表达式解析（支持逻辑运算）
     def _parse_or_expression(self) -> ASTNode:
@@ -1096,7 +1338,7 @@ class Parser:
         return self._parse_or_expression()
 
     def _parse_primary(self) -> ASTNode:
-        """解析基本表达式（★ 支持聚合函数调用识别）"""
+        """★ 修改：解析基本表达式（支持表.列引用和聚合函数）"""
         # 括号表达式
         if self._check(TokenType.DELIMITER) and self._peek().lexeme == "(":
             lpar = self._advance()
@@ -1123,28 +1365,38 @@ class Parser:
             token = self._advance()
             return ValueNode(None, "NULL", token.line, token.col)
 
-        # ★ 修复：IDENTIFIER 后面如果紧跟 "(" 则按函数调用解析（限五个聚合）
+        # ★ 修改：IDENTIFIER 处理（支持表.列和聚合函数）
         if self._check(TokenType.IDENTIFIER):
-            # 先看下一个 token，不前进指针
-            cur = self._peek()  # IDENTIFIER
-            # 防越界：检查是否有下一个token
+            cur = self._peek()  # 当前标识符
+
+            # 先检查下一个token是否为左括号（函数调用）
             nxt = self.tokens[self.current + 1] if (self.current + 1) < len(self.tokens) else None
 
             if nxt is not None and nxt.type == TokenType.DELIMITER and nxt.lexeme == "(":
-                # 识别为函数调用：检查是否为聚合函数
+                # 函数调用：检查是否为聚合函数
                 func_name = cur.lexeme.upper()
                 if func_name in ["COUNT", "SUM", "AVG", "MIN", "MAX"]:
                     return self._parse_agg_call_in_expr()
                 else:
-                    # 非聚合函数：报错（暂不支持其他函数）
                     raise ParseError(cur.line, cur.col, f"Unsupported function: {func_name}")
 
-            # 普通列名
-            token = self._advance()
-            return ColumnNode(token.lexeme, token.line, token.col)
+            # 检查是否为表.列格式
+            elif nxt is not None and nxt.type == TokenType.DELIMITER and nxt.lexeme == ".":
+                # 表.列引用
+                table_token = self._advance()  # 消费表名
+                self._advance()  # 消费点号
+                col_token = self._consume(TokenType.IDENTIFIER, None, "Expected column name after '.'")
+                qualified_name = f"{table_token.lexeme}.{col_token.lexeme}"
+                return ColumnNode(qualified_name, table_token.line, table_token.col)
+
+            else:
+                # 普通列名
+                token = self._advance()
+                return ColumnNode(token.lexeme, token.line, token.col)
 
         current = self._peek()
-        raise ParseError(current.line, current.col, "Expected expression", "number, string, identifier or '(' ... ')'")
+        raise ParseError(current.line, current.col, "Expected expression",
+                         "number, string, identifier, table.column or '(' ... ')'")
 
     def _parse_value(self) -> ValueNode:
         """解析值"""
@@ -1460,7 +1712,196 @@ def test_having_bug_fix():
             print(f"❌ 其他错误: {e}")
 
 
+def test_s8_join_parser():
+    """测试S8 JOIN语法解析"""
+    print("=== S8 JOIN Parser扩展测试 ===")
+
+    parser = Parser()
+
+    test_cases = [
+        # 内连接测试
+        ("SELECT * FROM students s JOIN scores sc ON s.id = sc.student_id;", "隐式内连接"),
+        ("SELECT * FROM students s INNER JOIN scores sc ON s.id = sc.student_id;", "显式内连接"),
+
+        # 外连接测试
+        ("SELECT * FROM students s LEFT JOIN scores sc ON s.id = sc.student_id;", "左外连接"),
+        ("SELECT s.name, sc.score FROM students s LEFT OUTER JOIN scores sc ON s.id = sc.student_id;",
+         "左外连接(OUTER)"),
+        ("SELECT * FROM students s RIGHT JOIN scores sc ON s.id = sc.student_id;", "右外连接"),
+
+        # 表别名测试
+        ("SELECT s.name, sc.score FROM students s JOIN scores sc ON s.id = sc.student_id;", "表别名"),
+        ("SELECT students.name, scores.score FROM students JOIN scores ON students.id = scores.student_id;", "无别名"),
+
+        # 多表连接测试
+        ("SELECT s.name, c.title, sc.score FROM students s JOIN scores sc ON s.id = sc.student_id JOIN courses c ON sc.course_id = c.id;",
+         "三表连接"),
+
+        # 复杂查询测试
+        ("SELECT s.name, AVG(sc.score) as avg_score FROM students s LEFT JOIN scores sc ON s.id = sc.student_id WHERE s.major = 'CS' GROUP BY s.id, s.name HAVING AVG(sc.score) > 80 ORDER BY avg_score DESC LIMIT 5;",
+         "JOIN+聚合+完整管线"),
+
+        # 隐式连接（FROM A,B WHERE...）
+        ("SELECT s.name, sc.score FROM students s, scores sc WHERE s.id = sc.student_id;", "隐式连接"),
+    ]
+
+    for i, (sql, desc) in enumerate(test_cases, 1):
+        print(f"\n[测试 {i}] {desc}")
+        print(f"SQL: {sql}")
+        try:
+            ast = parser.parse(sql)
+            print("✓ 解析成功")
+
+            # 显示关键特性
+            if isinstance(ast, SelectNode):
+                # 分析FROM子句
+                if isinstance(ast.from_clause, TableRefNode):
+                    table = ast.from_clause
+                    print(f"   单表: {table.table_name}" + (f" AS {table.alias}" if table.alias else ""))
+                elif isinstance(ast.from_clause, list):
+                    print(f"   多表查询: {len(ast.from_clause)}个表/JOIN")
+                    for j, item in enumerate(ast.from_clause):
+                        if isinstance(item, TableRefNode):
+                            print(f"     表{j}: {item.table_name}" + (f" AS {item.alias}" if item.alias else ""))
+                        elif isinstance(item, JoinNode):
+                            right_table = item.right_table
+                            print(f"     {item.join_type} JOIN: {right_table.table_name}" +
+                                  (f" AS {right_table.alias}" if right_table.alias else ""))
+
+                # 检查列引用
+                qualified_cols = []
+                for col in ast.columns:
+                    if isinstance(col, ColumnNode) and "." in col.name:
+                        qualified_cols.append(col.name)
+                    elif isinstance(col, AliasColumnNode) and "." in col.column_name:
+                        qualified_cols.append(col.column_name)
+
+                if qualified_cols:
+                    print(f"   限定列引用: {qualified_cols[:3]}" + ("..." if len(qualified_cols) > 3 else ""))
+
+        except ParseError as e:
+            print(f"❌ 语法错误: {e.hint}")
+        except Exception as e:
+            print(f"❌ 其他错误: {e}")
+
+
+def test_join_error_cases():
+    """测试JOIN语法错误检测"""
+    print("\n=== JOIN语法错误检测测试 ===")
+
+    parser = Parser()
+
+    error_cases = [
+        ("SELECT * FROM students JOIN;", "JOIN缺少表名"),
+        ("SELECT * FROM students JOIN scores;", "JOIN缺少ON条件"),
+        ("SELECT * FROM students FULL JOIN scores ON s.id = sc.id;", "不支持的JOIN类型"),
+        ("SELECT * FROM students LEFT scores ON s.id = sc.id;", "LEFT缺少JOIN关键字"),
+        ("SELECT * FROM students JOIN scores ON;", "ON条件为空"),
+        ("SELECT * FROM students s JOIN scores ON s.id = sc.student_id;", "右表缺少别名但引用了别名"),
+    ]
+
+    for i, (sql, expected_error) in enumerate(error_cases, 1):
+        print(f"\n[错误测试 {i}] {expected_error}")
+        print(f"SQL: {sql}")
+        try:
+            ast = parser.parse(sql)
+            print(f"❌ 应该报错但解析成功了")
+        except ParseError as e:
+            print(f"✓ 正确捕获错误: {e.hint}")
+        except Exception as e:
+            print(f"✓ 捕获其他错误: {e}")
+
+
+def test_join_bugfixes():
+    """测试JOIN Bug修复效果"""
+    print("=== JOIN Bug修复测试 ===")
+
+    parser = Parser()
+
+    # 之前失败的测试用例
+    test_cases = [
+        # 表.列引用测试
+        ("SELECT s.name, sc.score FROM students s JOIN scores sc ON s.id = sc.student_id;", "表.列引用"),
+        ("SELECT students.name, scores.score FROM students JOIN scores ON students.id = scores.student_id;",
+         "无别名表.列"),
+
+        # OUTER JOIN测试
+        ("SELECT s.name, sc.score FROM students s LEFT OUTER JOIN scores sc ON s.id = sc.student_id;",
+         "LEFT OUTER JOIN"),
+        ("SELECT * FROM students s RIGHT OUTER JOIN scores sc ON s.id = sc.student_id;", "RIGHT OUTER JOIN"),
+
+        # 复杂查询测试
+        ("SELECT s.name, AVG(sc.score) as avg_score FROM students s LEFT JOIN scores sc ON s.id = sc.student_id WHERE s.major = 'CS' GROUP BY s.id, s.name;",
+         "复杂JOIN查询"),
+
+        # 三表连接测试
+        ("SELECT s.name, c.title, sc.score FROM students s JOIN scores sc ON s.id = sc.student_id JOIN courses c ON sc.course_id = c.id;",
+         "三表连接"),
+    ]
+
+    for i, (sql, desc) in enumerate(test_cases, 1):
+        print(f"\n[修复测试 {i}] {desc}")
+        print(f"SQL: {sql}")
+        try:
+            ast = parser.parse(sql)
+            print("✓ 解析成功")
+
+            # 显示关键特性
+            if isinstance(ast, SelectNode):
+                # 检查列引用
+                qualified_cols = []
+                for col in ast.columns:
+                    if isinstance(col, ColumnNode) and "." in col.name:
+                        qualified_cols.append(col.name)
+                    elif isinstance(col, AliasColumnNode) and "." in col.column_name:
+                        qualified_cols.append(col.column_name)
+
+                if qualified_cols:
+                    print(f"   表.列引用: {qualified_cols}")
+
+                # 分析FROM子句
+                if isinstance(ast.from_clause, list) and len(ast.from_clause) > 1:
+                    join_types = []
+                    for item in ast.from_clause[1:]:
+                        if isinstance(item, JoinNode):
+                            join_types.append(item.join_type)
+                    print(f"   JOIN类型: {join_types}")
+
+        except ParseError as e:
+            print(f"❌ 语法错误: {e.hint}")
+        except Exception as e:
+            print(f"❌ 其他错误: {e}")
+
+
+def test_join_error_fixes():
+    """测试JOIN错误处理修复"""
+    print("\n=== JOIN错误处理修复测试 ===")
+
+    parser = Parser()
+
+    error_cases = [
+        # 应该报错的用例
+        ("SELECT * FROM students FULL JOIN scores ON s.id = sc.id;", "FULL JOIN应该报错"),
+        ("SELECT * FROM students FULL OUTER JOIN scores ON s.id = sc.id;", "FULL OUTER JOIN应该报错"),
+        ("SELECT s.name, sc.score FROM students s, scores sc WHERE s.id = sc.student_id;", "隐式连接应该报错"),
+    ]
+
+    for i, (sql, expected_error) in enumerate(error_cases, 1):
+        print(f"\n[错误修复测试 {i}] {expected_error}")
+        print(f"SQL: {sql}")
+        try:
+            ast = parser.parse(sql)
+            print(f"❌ 应该报错但解析成功了")
+        except ParseError as e:
+            print(f"✓ 正确捕获错误: {e.hint}")
+        except Exception as e:
+            print(f"✓ 捕获其他错误: {e}")
+
 if __name__ == "__main__":
     # test_s6s7_parser_extensions()
     # test_parser_error_cases()
-    test_having_bug_fix()
+    # test_having_bug_fix()
+    test_s8_join_parser()
+    test_join_error_cases()
+    test_join_bugfixes()
+    test_join_error_fixes()
